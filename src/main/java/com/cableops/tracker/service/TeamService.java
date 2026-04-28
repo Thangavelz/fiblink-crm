@@ -60,15 +60,14 @@ public class TeamService {
         map(t, req);
         teamRepo.save(t);
 
-        // Replace members if userIds is provided
         if (req.getUserIds() != null) {
             userTeamRepo.deleteByTeamId(id);
+            userTeamRepo.flush();              // ← ADD THIS — forces DELETE to DB before INSERT
             saveMembers(id, t.getName(), req.getUserIds());
         }
 
         return toResponse(t);
     }
-
     // ── DELETE ────────────────────────────────────────────────────────────────
     @Transactional
     public void delete(String id) {
