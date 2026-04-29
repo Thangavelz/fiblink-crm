@@ -1,0 +1,37 @@
+package com.cableops.tracker.controller;
+ 
+import com.cableops.tracker.dto.InventoryStockResponse;
+import com.cableops.tracker.service.InventoryService;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.*;
+ 
+import java.util.List;
+import java.util.Map;
+ 
+@RestController
+@RequestMapping("/api/inventory")
+@RequiredArgsConstructor
+public class InventoryStockController {
+ 
+    private final InventoryService service;
+ 
+    /** Current stock levels, optionally filtered by store or item type */
+    @GetMapping("/stock")
+    public List<InventoryStockResponse> stock(
+            @RequestParam(required = false) String storeAreaCode,
+            @RequestParam(required = false) String itemType,
+            HttpServletResponse response) {
+        List<InventoryStockResponse> list = service.listStock(storeAreaCode, itemType);
+        response.setHeader("X-Total-Count", String.valueOf(list.size()));
+        response.setHeader("Access-Control-Expose-Headers", "X-Total-Count");
+        return list;
+    }
+ 
+    /** Dashboard summary counts */
+    @GetMapping("/summary")
+    public Map<String, Object> summary(
+            @RequestParam(required = false) String storeAreaCode) {
+        return service.summary(storeAreaCode);
+    }
+}

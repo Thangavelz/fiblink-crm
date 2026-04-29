@@ -24,12 +24,12 @@ public class TaskResponse {
 	private String parentType;
 	private String parentName;
 
-	private List<String>        cOHFCircuitsesIds;
+	private List<String> cOHFCircuitsesIds;
 	private Map<String, String> cOHFCircuitsesNames;
 
 	@JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
 	private LocalDateTime dateStart;
-	private LocalDate     dateStartDate;
+	private LocalDate dateStartDate;
 
 	@JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
 	private LocalDateTime dateCompleted;
@@ -41,23 +41,23 @@ public class TaskResponse {
 	private String assignedUserId;
 	private String assignedUserName;
 
-	private List<String>        cSecondaryAssignedUserIds;
+	private List<String> cSecondaryAssignedUserIds;
 	private Map<String, String> cSecondaryAssignedUserNames;
 
 	private String accountId;
 	private String accountName;
 
-	private List<String>        teamsIds;
+	private List<String> teamsIds;
 	private Map<String, String> teamsNames;
 
-	private List<String>        attachmentsIds;
+	private List<String> attachmentsIds;
 	private Map<String, String> attachmentsNames;
 	private Map<String, String> attachmentsTypes;
 
-	private String  ofcType;
-	private Double  ofcStartingMtr;
-	private Double  ofcEndingMtr;
-	private Double  fiberUsedMtr;
+	private String ofcType;
+	private Double ofcStartingMtr;
+	private Double ofcEndingMtr;
+	private Double fiberUsedMtr;
 	private Integer mediumJcBoxUsed;
 	private Integer smallJcBoxUsed;
 	private Integer patchCableUsed;
@@ -73,7 +73,7 @@ public class TaskResponse {
 	private String createdById;
 	private String createdByName;
 
-	private Integer       acceptanceTimeMins;
+	private Integer acceptanceTimeMins;
 
 	@JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
 	private LocalDateTime acceptedAt;
@@ -81,9 +81,10 @@ public class TaskResponse {
 	private String acceptedById;
 	private String acceptedByName;
 
-	private List<String>        cEBBMLLsIds;
+	private List<String> cEBBMLLsIds;
 	private Map<String, String> cEBBMLLsNames;
 
 	private String cFieldNotes;
 	private String cResolutionNotes;
+
 }

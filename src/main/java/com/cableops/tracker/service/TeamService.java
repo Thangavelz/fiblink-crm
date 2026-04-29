@@ -62,7 +62,7 @@ public class TeamService {
 
         if (req.getUserIds() != null) {
             userTeamRepo.deleteByTeamId(id);
-            userTeamRepo.flush();              // ← ADD THIS — forces DELETE to DB before INSERT
+            userTeamRepo.flush();   // ← forces DELETE to DB before INSERT
             saveMembers(id, t.getName(), req.getUserIds());
         }
 

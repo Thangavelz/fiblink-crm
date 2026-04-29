@@ -6,11 +6,15 @@ import org.springframework.data.jpa.repository.Query;
 import java.util.List;
 
 public interface TaskRepository extends JpaRepository<Task, String> {
-    List<Task> findByParentId(String parentId);
-    List<Task> findByAssignedUserId(String assignedUserId);
-    List<Task> findByStatus(String status);
-    List<Task> findByAccountId(String accountId);
-    List<Task> findByParentType(String parentType);
+	List<Task> findByParentId(String parentId);
+
+	List<Task> findByAssignedUserId(String assignedUserId);
+
+	List<Task> findByStatus(String status);
+
+	List<Task> findByAccountId(String accountId);
+
+	List<Task> findByParentType(String parentType);
 
 	/**
 	 * Find tasks that: - have an acceptance SLA set - have NOT been accepted yet
