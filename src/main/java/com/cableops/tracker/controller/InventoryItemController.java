@@ -12,7 +12,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/inventory/items")
 @RequiredArgsConstructor
-public class InventoryControllers {
+public class InventoryItemController {
  
     private final InventoryService service;
  
@@ -22,15 +22,16 @@ public class InventoryControllers {
     }
  
     @GetMapping("/{id}")
-    public InventoryItemResponse get(@PathVariable String id) {
+    public InventoryItemResponse get(@PathVariable("id") String id) {
         return service.getItem(id);
     }
  
     @GetMapping
     public List<InventoryItemResponse> list(
-            @RequestParam(required = false) String itemType,
-            @RequestParam(required = false, defaultValue = "false") Boolean activeOnly,
+            @RequestParam(name = "itemType",   required = false)                      String  itemType,
+            @RequestParam(name = "activeOnly", required = false, defaultValue = "false") Boolean activeOnly,
             HttpServletResponse response) {
+ 
         List<InventoryItemResponse> items = service.listItems(itemType, activeOnly);
         response.setHeader("X-Total-Count", String.valueOf(items.size()));
         response.setHeader("Access-Control-Expose-Headers", "X-Total-Count");
@@ -38,7 +39,7 @@ public class InventoryControllers {
     }
  
     @PutMapping("/{id}")
-    public InventoryItemResponse update(@PathVariable String id,
+    public InventoryItemResponse update(@PathVariable("id") String id,
                                         @RequestBody InventoryItemRequest req) {
         return service.updateItem(id, req);
     }

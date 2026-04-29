@@ -5,7 +5,7 @@ import com.cableops.tracker.dto.LoginRequest;
 import com.cableops.tracker.dto.LoginResponse;
 import com.cableops.tracker.entity.User;
 import com.cableops.tracker.repository.UserRepository;
-import jakarta.servlet.http.HttpServletResponse;
+import io.jsonwebtoken.Claims;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -29,15 +29,11 @@ public class AuthController {
 
     /**
      * POST /api/auth/login
-     * Body: { "userName": "...", "password": "..." }
-     *
-     * - Sets an HttpOnly Secure SameSite=Strict cookie named "jwt"
-     * - Returns user metadata (NO token in body)
      */
     @PostMapping("/login")
     public ResponseEntity<LoginResponse> login(
             @RequestBody LoginRequest req,
-            HttpServletResponse response) {
+            jakarta.servlet.http.HttpServletResponse response) {
 
         User user = userRepo.findByUserName(req.getUserName())
                 .orElseThrow(() ->
@@ -53,10 +49,9 @@ public class AuthController {
 
         String token = jwtUtil.generate(user.getId(), user.getUserName(), user.getType());
 
-        // Set token as HttpOnly cookie — JS cannot read this
         ResponseCookie cookie = ResponseCookie.from("jwt", token)
                 .httpOnly(true)
-                .secure(false)          // set true in production (requires HTTPS)
+                .secure(false)
                 .sameSite("Strict")
                 .path("/")
                 .maxAge(Duration.ofHours(8))
@@ -64,29 +59,24 @@ public class AuthController {
 
         response.addHeader(HttpHeaders.SET_COOKIE, cookie.toString());
 
-        // Return user metadata only — token stays in cookie, never in body
-        LoginResponse body = new LoginResponse(
-                user.getId(),
-                user.getUserName(),
-                user.getName(),
-                user.getType()
-        );
-
-        return ResponseEntity.ok(body);
+        return ResponseEntity.ok(new LoginResponse(
+                user.getId(), user.getUserName(), user.getName(), user.getType()
+        ));
     }
 
     /**
      * POST /api/auth/logout
-     * Clears the jwt cookie by setting maxAge=0
      */
     @PostMapping("/logout")
-    public ResponseEntity<Map<String, String>> logout(HttpServletResponse response) {
+    public ResponseEntity<Map<String, String>> logout(
+            jakarta.servlet.http.HttpServletResponse response) {
+
         ResponseCookie cookie = ResponseCookie.from("jwt", "")
                 .httpOnly(true)
-                .secure(false)          // match the login setting
+                .secure(false)
                 .sameSite("Strict")
                 .path("/")
-                .maxAge(0)              // expire immediately
+                .maxAge(0)
                 .build();
 
         response.addHeader(HttpHeaders.SET_COOKIE, cookie.toString());
@@ -95,27 +85,45 @@ public class AuthController {
 
     /**
      * GET /api/auth/me
-     * Returns current user info from the JWT cookie — used on page reload
-     * to restore session without re-login.
+     *
+     * Validates the JWT cookie AND checks DB for:
+     *  - User still exists
+     *  - User is still active (isActive = true)
+     *  - Returns fresh name/role from DB (picks up admin changes in real time)
+     *
+     * Returns 401 if any check fails → frontend logs out immediately.
      */
     @GetMapping("/me")
-    public ResponseEntity<LoginResponse> me(jakarta.servlet.http.HttpServletRequest request) {
+    public ResponseEntity<LoginResponse> me(
+            jakarta.servlet.http.HttpServletRequest request) {
+
         String token = extractCookieToken(request);
 
+        // 1. No cookie or invalid JWT
         if (token == null || !jwtUtil.isValid(token)) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Not authenticated");
         }
 
-        var claims = jwtUtil.parse(token);
-        String userId   = claims.getSubject();
+        Claims claims   = jwtUtil.parse(token);
         String userName = claims.get("userName", String.class);
-        String role     = claims.get("role",     String.class);
 
+        // 2. Look up user in DB — catches deleted users
         User user = userRepo.findByUserName(userName)
                 .orElseThrow(() ->
                         new ResponseStatusException(HttpStatus.UNAUTHORIZED, "User not found"));
 
-        return ResponseEntity.ok(new LoginResponse(userId, userName, user.getName(), role));
+        // 3. Check isActive — catches deactivated users immediately
+        if (!Boolean.TRUE.equals(user.getIsActive())) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Account is inactive");
+        }
+
+        // Return fresh data from DB (name or role may have changed)
+        return ResponseEntity.ok(new LoginResponse(
+                user.getId(),
+                user.getUserName(),
+                user.getName(),    // fresh from DB
+                user.getType()     // fresh from DB
+        ));
     }
 
     private String extractCookieToken(jakarta.servlet.http.HttpServletRequest request) {

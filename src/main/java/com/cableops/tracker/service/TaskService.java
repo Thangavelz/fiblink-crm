@@ -1,20 +1,17 @@
 package com.cableops.tracker.service;
 
-import com.cableops.tracker.dto.TaskCommentDto;
-import com.cableops.tracker.dto.TaskCommentRequest;
-import com.cableops.tracker.dto.TaskRequest;
-import com.cableops.tracker.dto.TaskResponse;
-import com.cableops.tracker.entity.Attachment;
-import com.cableops.tracker.entity.EbbMll;
-import com.cableops.tracker.entity.Task;
-import com.cableops.tracker.entity.TaskCircuit;
-import com.cableops.tracker.entity.TaskComment;
-import com.cableops.tracker.entity.TaskEbbMll;
+import com.cableops.tracker.dto.*;
+import com.cableops.tracker.entity.*;
 import com.cableops.tracker.repository.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -28,16 +25,45 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class TaskService {
 
-	private final TaskRepository        taskRepo;
-	private final TaskCommentRepository commentRepo;
+	private final TaskRepository taskRepo;
+	private final TaskCommentRepository taskCommentRepo;
 	private final TaskCircuitRepository taskCircuitRepo;
-	private final TaskEbbMllRepository  taskEbbMllRepo;
-	private final OhfCircuitRepository  circuitRepo;
-	private final EbbMllRepository      ebbMllRepo;
-	private final UserRepository        userRepo;
-	private final AccountRepository     accountRepo;
-	private final TelegramService       telegramService;
-	private final AttachmentRepository  attachmentRepo;   // ← NEW
+	private final TaskEbbMllRepository taskEbbMllRepo;
+	private final OhfCircuitRepository circuitRepo;
+	private final EbbMllRepository ebbMllRepo;
+	private final UserRepository userRepo;
+	private final UserTeamRepository userTeamRepo;
+	private final TeamRepository teamRepo;
+	private final AccountRepository accountRepo;
+	private final AttachmentRepository attachmentRepo;
+	private final TelegramService telegramService;
+	private final ObjectMapper objectMapper;
+	private final InventoryStockRepository inventoryStockRepo;
+	private final InventoryTransactionRepository inventoryTxnRepo;
+
+	private static final String JCV_MEDIUM = "jcv-md";
+	private static final String JCV_SMALL = "jcv-sm";
+
+	// ── ACCEPT ────────────────────────────────────────────────────────────────
+	@Transactional
+	public TaskResponse acceptTask(String id) {
+		Task task = taskRepo.findById(id).orElseThrow(() -> new RuntimeException("Task not found: " + id));
+
+		if (task.getAcceptedAt() != null) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Task has already been accepted");
+		}
+
+		String userId = currentUserId();
+		String userName = currentUserName();
+
+		task.setAcceptedAt(LocalDateTime.now());
+		task.setAcceptedById(userId);
+		task.setAcceptedByName(userName);
+		task.setModifiedAt(LocalDateTime.now());
+		taskRepo.save(task);
+
+		return toResponseFromDb(task);
+	}
 
 	// ── CREATE ────────────────────────────────────────────────────────────────
 	@Transactional
@@ -48,32 +74,15 @@ public class TaskService {
 		t.setCreatedAt(LocalDateTime.now());
 		t.setModifiedAt(LocalDateTime.now());
 		map(t, req);
-
-		// Resolve account from parent — OHF circuit or EBB/MLL
-		if (req.getParentId() != null) {
-			if ("EBBMLLs".equals(req.getParentType())) {
-				ebbMllRepo.findById(req.getParentId()).ifPresent(e -> {
-					t.setAccountId(e.getAccountId());
-					t.setAccountName(e.getAccountName());
-				});
-			} else {
-				circuitRepo.findById(req.getParentId()).ifPresent(c -> {
-					t.setAccountId(c.getAccountId());
-					t.setAccountName(c.getAccountName());
-				});
-			}
-		}
+		resolveAccount(t, req);
 
 		taskRepo.save(t);
 		saveCircuits(t.getId(), req.getCOHFCircuitsesIds(), req.getCOHFCircuitsesNames());
 		saveEbbMlls(t.getId(), req.getCEBBMLLsIds(), req.getCEBBMLLsNames());
-
-		// ── Re-link any attachments uploaded with relatedId="temp" ────────────
 		linkAttachmentsToTask(t.getId(), req.getAttachmentsIds());
+		addSystemComment(t, "create", null, currentUserId(), currentUserName());
 
-		logCreate(t.getId(), req);
-
-		// ── Telegram notifications ────────────────────────────────────────────
+		// Telegram
 		String msg = buildCreateMessage(t, req);
 		notifyAllUsers(req.getAssignedUserId(), req.getCSecondaryAssignedUserIds(), msg);
 		notifyAccountGroup(t.getAccountId(), msg);
@@ -89,24 +98,24 @@ public class TaskService {
 
 	// ── LIST ──────────────────────────────────────────────────────────────────
 	public List<TaskResponse> list(String status, String assignedUserId, String accountId) {
-		List<Task> tasks;
+		List<Task> all;
 		if (status != null)
-			tasks = taskRepo.findByStatus(status);
+			all = taskRepo.findByStatus(status);
 		else if (assignedUserId != null)
-			tasks = taskRepo.findByAssignedUserId(assignedUserId);
+			all = taskRepo.findByAssignedUserId(assignedUserId);
 		else if (accountId != null)
-			tasks = taskRepo.findByAccountId(accountId);
+			all = taskRepo.findByAccountId(accountId);
 		else
-			tasks = taskRepo.findAll();
+			all = taskRepo.findAll();
 
-		return tasks.stream().map(t -> {
+		return all.stream().map(t -> {
 			try {
 				return toResponseFromDb(t);
 			} catch (Exception e) {
 				log.error("Error mapping task {}: {}", t.getId(), e.getMessage());
 				return baseFields(t);
 			}
-		}).toList();
+		}).collect(Collectors.toList());
 	}
 
 	// ── UPDATE ────────────────────────────────────────────────────────────────
@@ -115,26 +124,16 @@ public class TaskService {
 		Task old = taskRepo.findById(id).orElseThrow(() -> new RuntimeException("Task not found: " + id));
 
 		String oldStatus = old.getStatus();
-		Map<String, Boolean> changedFields = detectChanges(old, req);
+		boolean wasCompleted = "Completed".equals(oldStatus);
+		boolean isCompleting = "Completed".equals(req.getStatus()) && !wasCompleted;
 
-		validateMaterialOnComplete(old, req);
+		if (isCompleting)
+			validateMaterialOnComplete(old, req);
+
+		Map<String, Boolean> changed = detectChanges(old, req);
 		map(old, req);
+		resolveAccount(old, req);
 		old.setModifiedAt(LocalDateTime.now());
-
-		if (req.getParentId() != null) {
-			if ("EBBMLLs".equals(req.getParentType())) {
-				ebbMllRepo.findById(req.getParentId()).ifPresent(e -> {
-					old.setAccountId(e.getAccountId());
-					old.setAccountName(e.getAccountName());
-				});
-			} else {
-				circuitRepo.findById(req.getParentId()).ifPresent(c -> {
-					old.setAccountId(c.getAccountId());
-					old.setAccountName(c.getAccountName());
-				});
-			}
-		}
-
 		taskRepo.save(old);
 
 		if (req.getCOHFCircuitsesIds() != null) {
@@ -145,36 +144,34 @@ public class TaskService {
 			taskEbbMllRepo.deleteByTaskId(id);
 			saveEbbMlls(id, req.getCEBBMLLsIds(), req.getCEBBMLLsNames());
 		}
-
-		// ── Reconcile attachments — delete removed, link new ──────────────────
 		if (req.getAttachmentsIds() != null) {
 			reconcileAttachments(id, req.getAttachmentsIds());
 		}
 
-		// Status-change detection: ONLY when truly different
+		// Activity log
 		String requestedStatus = req.getStatus();
 		boolean statusActuallyChanged = requestedStatus != null && !requestedStatus.equals(oldStatus);
 
 		if (statusActuallyChanged) {
-			logStatus(id, req, requestedStatus);
+			addSystemComment(old, "status", Map.of("from", oldStatus != null ? oldStatus : "", "to", requestedStatus),
+					currentUserId(), currentUserName());
 		}
 
-		List<String> updatedFieldNames = changedFields.entrySet().stream().filter(Map.Entry::getValue)
-				.map(Map.Entry::getKey).collect(Collectors.toList());
-		if (!updatedFieldNames.isEmpty()) {
-			logUpdate(id, req, updatedFieldNames);
+		List<String> changedFieldNames = changed.entrySet().stream().filter(Map.Entry::getValue).map(Map.Entry::getKey)
+				.collect(Collectors.toList());
+		if (!changedFieldNames.isEmpty()) {
+			addSystemComment(old, "update", changed, currentUserId(), currentUserName());
 		}
 
-		// ── Telegram notifications ────────────────────────────────────────────
-		// Skip the whole notification only if literally nothing changed.
-		if (statusActuallyChanged || !updatedFieldNames.isEmpty()) {
+		// Inventory auto-deduction
+		if (isCompleting)
+			deductInventoryOnComplete(old, id);
+
+		// Telegram
+		if (statusActuallyChanged || !changedFieldNames.isEmpty()) {
 			List<String> secondaryIds = resolveSecondaryIds(old, req);
-
-			// Pass the actual status delta (null if unchanged) so the message
-			// header is "Task Status Updated" only on real status changes.
 			String statusForMsg = statusActuallyChanged ? requestedStatus : null;
-
-			String msg = buildUpdateMessage(old, req, statusForMsg, updatedFieldNames);
+			String msg = buildUpdateMessage(old, req, statusForMsg, changedFieldNames);
 			notifyAllUsers(old.getAssignedUserId(), secondaryIds, msg);
 			notifyAccountGroup(old.getAccountId(), msg);
 		}
@@ -187,11 +184,12 @@ public class TaskService {
 	public void delete(String id) {
 		if (!taskRepo.existsById(id))
 			throw new RuntimeException("Task not found: " + id);
+
 		taskCircuitRepo.deleteByTaskId(id);
 		taskEbbMllRepo.deleteByTaskId(id);
-		commentRepo.findByTaskIdOrderByCreatedAtAsc(id).forEach(c -> commentRepo.deleteById(c.getId()));
+		taskCommentRepo.findByTaskIdOrderByCreatedAtAsc(id).forEach(c -> taskCommentRepo.deleteById(c.getId()));
 
-		// Also clean up attachment rows + files for this task
+		// Delete attachment files + rows
 		List<Attachment> linked = attachmentRepo.findByRelatedIdAndRelatedType(id, "Task");
 		for (Attachment a : linked) {
 			deleteAttachmentFile(a);
@@ -201,10 +199,12 @@ public class TaskService {
 		taskRepo.deleteById(id);
 	}
 
-	// ── ADD COMMENT ───────────────────────────────────────────────────────────
+	// ── COMMENT ───────────────────────────────────────────────────────────────
+	@Transactional
 	public TaskCommentDto addComment(String taskId, TaskCommentRequest req) {
 		if (!taskRepo.existsById(taskId))
 			throw new RuntimeException("Task not found: " + taskId);
+
 		TaskComment c = new TaskComment();
 		c.setId(UUID.randomUUID().toString());
 		c.setTaskId(taskId);
@@ -214,20 +214,18 @@ public class TaskService {
 		c.setText(req.getText());
 		c.setType("comment");
 		c.setCreatedAt(LocalDateTime.now());
-		commentRepo.save(c);
+		taskCommentRepo.save(c);
 		return toCommentDto(c);
 	}
 
 	// ── ATTACHMENT HELPERS ────────────────────────────────────────────────────
 
-	/**
-	 * Re-point any attachments uploaded with relatedId="temp" to the new task ID.
-	 * Used during task creation, where the upload happens before the task exists.
-	 */
-	private void linkAttachmentsToTask(String taskId, List<String> attachmentIds) {
-		if (attachmentIds == null || attachmentIds.isEmpty()) return;
-		for (String attId : attachmentIds) {
-			if (attId == null || attId.isBlank()) continue;
+	private void linkAttachmentsToTask(String taskId, List<String> ids) {
+		if (ids == null || ids.isEmpty())
+			return;
+		for (String attId : ids) {
+			if (attId == null || attId.isBlank())
+				continue;
 			attachmentRepo.findById(attId).ifPresent(a -> {
 				if ("temp".equals(a.getRelatedId()) || a.getRelatedId() == null) {
 					a.setRelatedId(taskId);
@@ -238,49 +236,135 @@ public class TaskService {
 		}
 	}
 
-	/**
-	 * On update: compare currently-linked attachments to the request list.
-	 * Delete any that have been removed (DB row + file on disk).
-	 * The request never INSERTs new rows — those were created by the upload
-	 * endpoint at the moment the user clicked "Attach File".
-	 */
 	private void reconcileAttachments(String taskId, List<String> requestedIds) {
-		List<Attachment> currentlyLinked =
-				attachmentRepo.findByRelatedIdAndRelatedType(taskId, "Task");
-
-		Set<String> keepIds = new HashSet<>(requestedIds);
-
-		for (Attachment a : currentlyLinked) {
-			if (!keepIds.contains(a.getId())) {
+		List<Attachment> current = attachmentRepo.findByRelatedIdAndRelatedType(taskId, "Task");
+		Set<String> keep = new HashSet<>(requestedIds);
+		for (Attachment a : current) {
+			if (!keep.contains(a.getId())) {
 				deleteAttachmentFile(a);
 				attachmentRepo.deleteById(a.getId());
 				log.info("Removed attachment {} from task {}", a.getId(), taskId);
 			}
 		}
-
-		// Also link any "temp" rows the user just uploaded into this task ID
-		// (e.g. if they uploaded before clicking save on a freshly opened edit page).
 		linkAttachmentsToTask(taskId, requestedIds);
 	}
 
-	/**
-	 * Best-effort file deletion. Logs but never throws.
-	 */
 	private void deleteAttachmentFile(Attachment a) {
-		if (a.getPath() == null || a.getPath().isBlank()) return;
+		if (a.getPath() == null || a.getPath().isBlank())
+			return;
 		try {
-			Path p = Paths.get(a.getPath());
-			Files.deleteIfExists(p);
+			Files.deleteIfExists(Paths.get(a.getPath()));
 		} catch (Exception ex) {
 			log.warn("Could not delete attachment file {}: {}", a.getPath(), ex.getMessage());
 		}
 	}
 
+	// ── INVENTORY DEDUCTION ───────────────────────────────────────────────────
+
+	private void deductInventoryOnComplete(Task task, String taskId) {
+		try {
+			String storeAreaCode = resolveStoreAreaCode(task.getAssignedUserId());
+			if (storeAreaCode == null) {
+				log.warn("Task {} completed — no team/store for user {} — inventory skipped", taskId,
+						task.getAssignedUserId());
+				return;
+			}
+			String taskName = task.getName();
+			String userId = currentUserId();
+			String userName = currentUserName();
+
+			Double fiberUsed = task.getFiberUsedMtr();
+			if (fiberUsed != null && fiberUsed > 0 && task.getOfcType() != null) {
+				deductStock(resolveOfcItemId(task.getOfcType()), resolveOfcItemName(task.getOfcType()), storeAreaCode,
+						fiberUsed, taskId, taskName, userId, userName);
+			}
+			Integer medium = task.getMediumJcBoxUsed();
+			if (medium != null && medium > 0) {
+				deductStock(JCV_MEDIUM, "JCV Box - Medium", storeAreaCode, medium.doubleValue(), taskId, taskName,
+						userId, userName);
+			}
+			Integer small = task.getSmallJcBoxUsed();
+			if (small != null && small > 0) {
+				deductStock(JCV_SMALL, "JCV Box - Small", storeAreaCode, small.doubleValue(), taskId, taskName, userId,
+						userName);
+			}
+		} catch (Exception e) {
+			log.error("Inventory deduction failed for task {}: {}", taskId, e.getMessage(), e);
+		}
+	}
+
+	private void deductStock(String itemId, String itemName, String storeAreaCode, double qty, String taskId,
+			String taskName, String performedById, String performedByName) {
+		InventoryStock stock = inventoryStockRepo.findByItemIdAndStoreAreaCode(itemId, storeAreaCode).orElseGet(() -> {
+			log.warn("No stock record for item {} in store {} — creating at 0", itemName, storeAreaCode);
+			InventoryStock s = new InventoryStock();
+			s.setId(UUID.randomUUID().toString());
+			s.setItemId(itemId);
+			s.setStoreAreaCode(storeAreaCode);
+			s.setQuantityOnHand(0.0);
+			return inventoryStockRepo.save(s);
+		});
+
+		double before = stock.getQuantityOnHand();
+		double after = Math.max(0, before - qty);
+		if (before < qty) {
+			log.warn("Insufficient stock: {} in store {} — available: {}, needed: {}", itemName, storeAreaCode, before,
+					qty);
+		}
+		stock.setQuantityOnHand(after);
+		inventoryStockRepo.save(stock);
+
+		InventoryTransaction txn = new InventoryTransaction();
+		txn.setId(UUID.randomUUID().toString());
+		txn.setTxnType("USAGE");
+		txn.setItemId(itemId);
+		txn.setItemName(itemName);
+		txn.setStoreAreaCode(storeAreaCode);
+		txn.setStoreName(stock.getStoreName());
+		txn.setQuantityChange(-qty);
+		txn.setQuantityAfter(after);
+		txn.setTaskId(taskId);
+		txn.setTaskName(taskName);
+		txn.setPerformedById(performedById);
+		txn.setPerformedByName(performedByName);
+		txn.setNotes("Auto-deducted on task completion");
+		inventoryTxnRepo.save(txn);
+	}
+
+	private String resolveStoreAreaCode(String userId) {
+		if (userId == null)
+			return null;
+		for (UserTeam ut : userTeamRepo.findByUserId(userId)) {
+			Optional<Team> team = teamRepo.findById(ut.getTeamId());
+			if (team.isPresent() && team.get().getAreaCode() != null && !team.get().getAreaCode().isBlank()) {
+				return team.get().getAreaCode();
+			}
+		}
+		return null;
+	}
+
+	private String resolveOfcItemId(String ofcType) {
+		if (ofcType == null)
+			return "ofc-6f";
+		return switch (ofcType.toLowerCase().replaceAll("[^0-9f]", "")) {
+		case "4f" -> "ofc-4f";
+		case "12f" -> "ofc-12f";
+		default -> "ofc-6f";
+		};
+	}
+
+	private String resolveOfcItemName(String ofcType) {
+		if (ofcType == null)
+			return "OFC Cable";
+		return switch (ofcType.toLowerCase().replaceAll("[^0-9f]", "")) {
+		case "4f" -> "OFC Cable - 4F";
+		case "12f" -> "OFC Cable - 12F";
+		default -> "OFC Cable - 6F";
+		};
+	}
+
 	// ── TELEGRAM HELPERS ──────────────────────────────────────────────────────
 
-	/**
-	 * Notify the primary assigned user + all secondary users.
-	 */
 	private void notifyAllUsers(String assignedUserId, List<String> secondaryIds, String message) {
 		notifyUser(assignedUserId, message);
 		if (secondaryIds != null) {
@@ -288,9 +372,6 @@ public class TaskService {
 		}
 	}
 
-	/**
-	 * Lookup the user's telegramUsername and send a private message.
-	 */
 	private void notifyUser(String userId, String message) {
 		if (userId == null || userId.isBlank())
 			return;
@@ -305,9 +386,6 @@ public class TaskService {
 		});
 	}
 
-	/**
-	 * Lookup the account's Telegram group chat ID and send there.
-	 */
 	private void notifyAccountGroup(String accountId, String message) {
 		if (accountId == null || accountId.isBlank())
 			return;
@@ -329,58 +407,45 @@ public class TaskService {
 	}
 
 	private String buildUpdateMessage(Task t, TaskRequest req, String newStatus, List<String> changedFields) {
-
-		// Header switches based on whether status actually changed
 		String header = (newStatus != null && !newStatus.isBlank()) ? "📌 Task Status Updated" : "📌 Task Updated";
 
 		StringBuilder footer = new StringBuilder();
-		if (newStatus != null && !newStatus.isBlank()) {
+		if (newStatus != null && !newStatus.isBlank())
 			footer.append("\n<b>🔔 Status changed to:</b> ").append(newStatus);
-		}
-		if (changedFields != null && !changedFields.isEmpty()) {
+		if (changedFields != null && !changedFields.isEmpty())
 			footer.append("\n<b>Updated Fields:</b> ").append(String.join(", ", changedFields));
-		}
+
 		return buildStandardMessage(header, t, req, footer.length() > 0 ? footer.toString() : null);
 	}
 
 	private String buildStandardMessage(String header, Task t, TaskRequest req, String footer) {
-
 		StringBuilder sb = new StringBuilder();
 		sb.append("<b>").append(header).append("</b>\n\n");
 
 		String circuitName = coalesce(req != null ? req.getParentName() : null, t.getParentName());
 		sb.append("<b>Circuit Name:</b> ").append(coalesce(circuitName, "—")).append("\n");
-
 		sb.append("<b>Account:</b> ").append(coalesce(t.getAccountName(), "—")).append("\n");
-
 		sb.append("<b>SR Number:</b> ").append(coalesce(t.getCSRNumber(), "—")).append("\n");
-
 		sb.append("<b>Status:</b> ").append(coalesce(t.getStatus(), "New")).append("\n");
-
 		sb.append("<b>Priority:</b> ").append(coalesce(t.getPriority(), "Normal")).append("\n");
-
 		sb.append("<b>Work Type:</b> ").append(coalesce(t.getCWorkType(), "—")).append("\n");
 
 		String circuitId = extractCircuitId(
 				req != null && req.getDescription() != null ? req.getDescription() : t.getDescription());
-		if (circuitId != null && !circuitId.isBlank()) {
+		if (circuitId != null && !circuitId.isBlank())
 			sb.append("<b>Circuit ID:</b> ").append(circuitId).append("\n");
-		}
 
 		String assignedName = coalesce(req != null ? req.getAssignedUserName() : null, t.getAssignedUserName());
-		if (assignedName != null && !assignedName.isBlank()) {
+		if (!isBlank(assignedName))
 			sb.append("<b>Assigned User:</b> ").append(assignedName).append("\n");
-		}
 
 		String secondaryNames = resolveSecondaryNamesString(t, req);
-		if (secondaryNames != null && !secondaryNames.isBlank()) {
+		if (!isBlank(secondaryNames))
 			sb.append("<b>Secondary Assigned User:</b> ").append(secondaryNames).append("\n");
-		}
 
 		String note = req != null && req.getCNote() != null ? req.getCNote() : t.getCNote();
-		if (!isBlank(note)) {
+		if (!isBlank(note))
 			sb.append("<b>Note:</b> ").append(note).append("\n");
-		}
 
 		String description = req != null && req.getDescription() != null ? req.getDescription() : t.getDescription();
 		if (!isBlank(description)) {
@@ -389,44 +454,36 @@ public class TaskService {
 				sb.append("\n");
 		}
 
-		// ─── Material Used block ──────────────────────────────────────────────
 		String materialBlock = buildMaterialUsedBlock(t, req);
-		if (materialBlock != null && !materialBlock.isBlank()) {
+		if (!isBlank(materialBlock))
 			sb.append("\n").append(materialBlock);
-		}
 
-		if (footer != null && !footer.isBlank()) {
+		if (!isBlank(footer))
 			sb.append(footer);
-		}
+
 		return sb.toString();
 	}
 
-	/**
-	 * Build the "Material Used" block for the Telegram message. Returns null if no
-	 * material values are present.
-	 */
 	private String buildMaterialUsedBlock(Task t, TaskRequest req) {
+		String ofcType = pickStr(req != null ? req.getOfcType() : null, t.getOfcType());
+		Double ofcStart = pickDbl(req != null ? req.getOfcStartingMtr() : null, t.getOfcStartingMtr());
+		Double ofcEnd = pickDbl(req != null ? req.getOfcEndingMtr() : null, t.getOfcEndingMtr());
+		Double fiberUsed = pickDbl(req != null ? req.getFiberUsedMtr() : null, t.getFiberUsedMtr());
+		Integer mediumBox = pickInt(req != null ? req.getMediumJcBoxUsed() : null, t.getMediumJcBoxUsed());
+		Integer smallBox = pickInt(req != null ? req.getSmallJcBoxUsed() : null, t.getSmallJcBoxUsed());
+		Integer patchCable = pickInt(req != null ? req.getPatchCableUsed() : null, t.getPatchCableUsed());
 
-		String  ofcType    = pickStr(req != null ? req.getOfcType()         : null, t.getOfcType());
-		Double  ofcStart   = pickDbl(req != null ? req.getOfcStartingMtr()  : null, t.getOfcStartingMtr());
-		Double  ofcEnd     = pickDbl(req != null ? req.getOfcEndingMtr()    : null, t.getOfcEndingMtr());
-		Double  fiberUsed  = pickDbl(req != null ? req.getFiberUsedMtr()    : null, t.getFiberUsedMtr());
-		Integer mediumBox  = pickInt(req != null ? req.getMediumJcBoxUsed() : null, t.getMediumJcBoxUsed());
-		Integer smallBox   = pickInt(req != null ? req.getSmallJcBoxUsed()  : null, t.getSmallJcBoxUsed());
-		Integer patchCable = pickInt(req != null ? req.getPatchCableUsed()  : null, t.getPatchCableUsed());
+		boolean any = !isBlank(ofcType) || ofcStart != null || ofcEnd != null || fiberUsed != null || mediumBox != null
+				|| smallBox != null || patchCable != null;
+		if (!any)
+			return null;
 
-		boolean any = (ofcType != null && !ofcType.isBlank()) || ofcStart != null || ofcEnd != null || fiberUsed != null
-				|| mediumBox != null || smallBox != null || patchCable != null;
-		if (!any) return null;
-
-		// Auto-derive Fiber Used if start/end given but value missing
-		if (fiberUsed == null && ofcStart != null && ofcEnd != null) {
+		if (fiberUsed == null && ofcStart != null && ofcEnd != null)
 			fiberUsed = Math.abs(ofcEnd - ofcStart);
-		}
 
 		StringBuilder b = new StringBuilder();
 		b.append("<b>📦 Material Used</b>\n");
-		if (ofcType != null && !ofcType.isBlank())
+		if (!isBlank(ofcType))
 			b.append("<b>OFC Type:</b> ").append(ofcType).append("\n");
 		if (ofcStart != null)
 			b.append("<b>OFC Starting (m):</b> ").append(fmtNum(ofcStart)).append("\n");
@@ -443,218 +500,231 @@ public class TaskService {
 		return b.toString();
 	}
 
-	private static String pickStr(String fromReq, String fromDb) {
-		return (fromReq != null && !fromReq.isBlank()) ? fromReq : fromDb;
-	}
-
-	private static Double pickDbl(Double fromReq, Double fromDb) {
-		return fromReq != null ? fromReq : fromDb;
-	}
-
-	private static Integer pickInt(Integer fromReq, Integer fromDb) {
-		return fromReq != null ? fromReq : fromDb;
-	}
-
-	private static String fmtNum(Double d) {
-		if (d == null) return "—";
-		if (d == Math.floor(d) && !Double.isInfinite(d)) {
-			return String.valueOf(d.longValue());
-		}
-		return String.valueOf(d);
-	}
-
 	private String extractCircuitId(String description) {
-		if (description == null || description.isBlank()) return null;
+		if (isBlank(description))
+			return null;
 		for (String line : description.split("\\R")) {
-			String trimmed = line.trim();
-			if (trimmed.regionMatches(true, 0, "Circuit ID:", 0, "Circuit ID:".length())) {
-				String value = trimmed.substring("Circuit ID:".length()).trim();
-				return value.isEmpty() ? null : value;
+			String t = line.trim();
+			if (t.regionMatches(true, 0, "Circuit ID:", 0, 11)) {
+				String val = t.substring(11).trim();
+				return val.isEmpty() ? null : val;
 			}
 		}
 		return null;
 	}
 
 	private String resolveSecondaryNamesString(Task t, TaskRequest req) {
-		if (req != null && req.getCSecondaryAssignedUserIds() != null && !req.getCSecondaryAssignedUserIds().isEmpty()
-				&& req.getCSecondaryAssignedUserNames() != null && !req.getCSecondaryAssignedUserNames().isEmpty()) {
+		if (req != null && req.getCSecondaryAssignedUserIds() != null && req.getCSecondaryAssignedUserNames() != null) {
 			String joined = req.getCSecondaryAssignedUserIds().stream()
-					.map(id -> req.getCSecondaryAssignedUserNames().getOrDefault(id, ""))
-					.filter(n -> n != null && !n.isBlank()).collect(Collectors.joining(", "));
-			if (!joined.isBlank()) return joined;
+					.map(id -> req.getCSecondaryAssignedUserNames().getOrDefault(id, "")).filter(n -> !isBlank(n))
+					.collect(Collectors.joining(", "));
+			if (!joined.isBlank())
+				return joined;
 		}
-		if (t.getCSecondaryUserNames() != null && !t.getCSecondaryUserNames().isBlank()) {
-			return Arrays.stream(t.getCSecondaryUserNames().split(","))
-					.map(String::trim).filter(n -> !n.isBlank())
+		if (!isBlank(t.getCSecondaryUserNames())) {
+			return Arrays.stream(t.getCSecondaryUserNames().split(",")).map(String::trim).filter(n -> !n.isBlank())
 					.collect(Collectors.joining(", "));
 		}
-		if (t.getCSecondaryAssignedUserName() != null && !t.getCSecondaryAssignedUserName().isBlank()) {
-			return t.getCSecondaryAssignedUserName();
+		return !isBlank(t.getCSecondaryAssignedUserName()) ? t.getCSecondaryAssignedUserName() : null;
+	}
+
+	// ── ACTIVITY LOG ─────────────────────────────────────────────────────────
+
+	private void addSystemComment(Task task, String type, Object data, String userId, String userName) {
+		try {
+			TaskComment c = new TaskComment();
+			c.setId(UUID.randomUUID().toString());
+			c.setTaskId(task.getId());
+			c.setType(type);
+			c.setUserId(userId);
+			c.setUserName(userName);
+			c.setCreatedAt(LocalDateTime.now());
+			if (data != null)
+				c.setData(objectMapper.writeValueAsString(data));
+			userRepo.findById(userId != null ? userId : "").ifPresent(u -> c.setAvatarId(u.getAvatarId()));
+			taskCommentRepo.save(c);
+		} catch (Exception ignored) {
 		}
-		return null;
-	}
-
-	// ── ACTIVITY LOG HELPERS ──────────────────────────────────────────────────
-
-	private void logCreate(String taskId, TaskRequest req) {
-		String assignedName = req.getAssignedUserName() != null ? req.getAssignedUserName() : "Unassigned";
-		commentRepo.save(buildLog(taskId, req, "create", "{\"assignedTo\":\"" + esc(assignedName) + "\","
-				+ "\"status\":\"" + esc(coalesce(req.getStatus(), "New")) + "\"}"));
-	}
-
-	private void logStatus(String taskId, TaskRequest req, String newStatus) {
-		commentRepo.save(buildLog(taskId, req, "status", "{\"status\":\"" + esc(newStatus) + "\"}"));
-	}
-
-	private void logUpdate(String taskId, TaskRequest req, List<String> fields) {
-		String fieldsJson = fields.stream().map(f -> "\"" + esc(f) + "\"").collect(Collectors.joining(",", "[", "]"));
-		commentRepo.save(buildLog(taskId, req, "update", "{\"fields\":" + fieldsJson + "}"));
-	}
-
-	private TaskComment buildLog(String taskId, TaskRequest req, String type, String data) {
-		TaskComment c = new TaskComment();
-		c.setId(UUID.randomUUID().toString());
-		c.setTaskId(taskId);
-		c.setUserId(req.getAssignedUserId());
-		c.setUserName(req.getAssignedUserName());
-		c.setType(type);
-		c.setData(data);
-		c.setCreatedAt(LocalDateTime.now());
-		return c;
 	}
 
 	// ── CHANGE DETECTION ─────────────────────────────────────────────────────
 
 	private Map<String, Boolean> detectChanges(Task old, TaskRequest req) {
 		Map<String, Boolean> m = new LinkedHashMap<>();
-		m.put("RFO",                     changed(old.getCRFO(),             req.getCRFO()));
-		m.put("Fiber Used (Mtr)",        changed(old.getFiberUsedMtr(),     req.getFiberUsedMtr()));
-		m.put("OFC Starting Mtr",        changed(old.getOfcStartingMtr(),   req.getOfcStartingMtr()));
-		m.put("OFC Ending Mtr",          changed(old.getOfcEndingMtr(),     req.getOfcEndingMtr()));
-		m.put("Medium JC Box Used (No)", changed(old.getMediumJcBoxUsed(),  req.getMediumJcBoxUsed()));
-		m.put("Small JC Box Used (No)",  changed(old.getSmallJcBoxUsed(),   req.getSmallJcBoxUsed()));
-		m.put("Patch Cable Used (No)",   changed(old.getPatchCableUsed(),   req.getPatchCableUsed()));
-		m.put("Description",             changed(old.getDescription(),      req.getDescription()));
-		m.put("Note",                    changed(old.getCNote(),            req.getCNote()));
-		m.put("Assigned User",           changed(old.getAssignedUserId(),   req.getAssignedUserId()));
-		m.put("Date Start",              changed(old.getDateStart(),        req.getDateStart()));
-		m.put("Date Completed",          changed(old.getDateCompleted(),    req.getDateCompleted()));
+		m.put("RFO", changed(old.getCRFO(), req.getCRFO()));
+		m.put("Fiber Used (Mtr)", changed(old.getFiberUsedMtr(), req.getFiberUsedMtr()));
+		m.put("OFC Type", changed(old.getOfcType(), req.getOfcType()));
+		m.put("OFC Starting Mtr", changed(old.getOfcStartingMtr(), req.getOfcStartingMtr()));
+		m.put("OFC Ending Mtr", changed(old.getOfcEndingMtr(), req.getOfcEndingMtr()));
+		m.put("Medium JC Box Used (No)", changed(old.getMediumJcBoxUsed(), req.getMediumJcBoxUsed()));
+		m.put("Small JC Box Used (No)", changed(old.getSmallJcBoxUsed(), req.getSmallJcBoxUsed()));
+		m.put("Patch Cable Used (No)", changed(old.getPatchCableUsed(), req.getPatchCableUsed()));
+		m.put("Description", changed(old.getDescription(), req.getDescription()));
+		m.put("Note", changed(old.getCNote(), req.getCNote()));
+		m.put("Assigned User", changed(old.getAssignedUserId(), req.getAssignedUserId()));
+		m.put("Date Start", changed(old.getDateStart(), req.getDateStart()));
+		m.put("Date Completed", changed(old.getDateCompleted(), req.getDateCompleted()));
 		return m;
 	}
 
-	private boolean changed(Object oldVal, Object newVal) {
-		if (newVal == null) return false;
-		return !newVal.equals(oldVal);
+	private boolean changed(Object o, Object n) {
+		return n != null && !n.equals(o);
 	}
 
-	// ── MAPPING HELPERS ───────────────────────────────────────────────────────
+	// ── VALIDATION ───────────────────────────────────────────────────────────
+
+	private void validateMaterialOnComplete(Task current, TaskRequest req) {
+		String workType = req.getCWorkType() != null ? req.getCWorkType() : current.getCWorkType();
+		if ("Survey".equalsIgnoreCase(workType))
+			return;
+
+		String ofcType = req.getOfcType() != null ? req.getOfcType() : current.getOfcType();
+		Double ofcStart = req.getOfcStartingMtr() != null ? req.getOfcStartingMtr() : current.getOfcStartingMtr();
+		Double ofcEnd = req.getOfcEndingMtr() != null ? req.getOfcEndingMtr() : current.getOfcEndingMtr();
+		Integer mediumBox = req.getMediumJcBoxUsed() != null ? req.getMediumJcBoxUsed() : current.getMediumJcBoxUsed();
+		Integer smallBox = req.getSmallJcBoxUsed() != null ? req.getSmallJcBoxUsed() : current.getSmallJcBoxUsed();
+		Integer patchCable = req.getPatchCableUsed() != null ? req.getPatchCableUsed() : current.getPatchCableUsed();
+
+		StringBuilder missing = new StringBuilder();
+		if (isBlank(ofcType))
+			missing.append("OFC Type, ");
+		if (ofcStart == null)
+			missing.append("OFC Starting Mtr, ");
+		if (ofcEnd == null)
+			missing.append("OFC Ending Mtr, ");
+		if (mediumBox == null)
+			missing.append("Medium JC Box Used, ");
+		if (smallBox == null)
+			missing.append("Small JC Box Used, ");
+		if (patchCable == null)
+			missing.append("Patch Cable Used, ");
+
+		if (missing.length() > 0)
+			throw new RuntimeException("Cannot complete task: Material Used fields are required — "
+					+ missing.substring(0, missing.length() - 2));
+	}
+
+	// ── MAPPING ───────────────────────────────────────────────────────────────
+
+	private void map(Task t, TaskRequest r) {
+		if (r.getName() != null)
+			t.setName(r.getName());
+		if (r.getStatus() != null)
+			t.setStatus(r.getStatus());
+		else if (t.getStatus() == null)
+			t.setStatus("New");
+		if (r.getPriority() != null)
+			t.setPriority(r.getPriority());
+		else if (t.getPriority() == null)
+			t.setPriority("Normal");
+		if (r.getCWorkType() != null)
+			t.setCWorkType(r.getCWorkType());
+		if (r.getCRFO() != null)
+			t.setCRFO(r.getCRFO());
+		if (r.getParentId() != null)
+			t.setParentId(r.getParentId());
+		if (r.getParentType() != null)
+			t.setParentType(r.getParentType());
+		if (r.getParentName() != null)
+			t.setParentName(r.getParentName());
+		if (r.getDateStart() != null)
+			t.setDateStart(r.getDateStart());
+		if (r.getDateStartDate() != null)
+			t.setDateStartDate(r.getDateStartDate());
+		if (r.getDateCompleted() != null)
+			t.setDateCompleted(r.getDateCompleted());
+		if (r.getCDurationText() != null)
+			t.setCDurationText(r.getCDurationText());
+		if (r.getDescription() != null)
+			t.setDescription(r.getDescription());
+		if (r.getCNote() != null)
+			t.setCNote(r.getCNote());
+		if (r.getAssignedUserId() != null)
+			t.setAssignedUserId(r.getAssignedUserId());
+		if (r.getAssignedUserName() != null)
+			t.setAssignedUserName(r.getAssignedUserName());
+		if (r.getOfcType() != null)
+			t.setOfcType(r.getOfcType());
+		if (r.getOfcStartingMtr() != null)
+			t.setOfcStartingMtr(r.getOfcStartingMtr());
+		if (r.getOfcEndingMtr() != null)
+			t.setOfcEndingMtr(r.getOfcEndingMtr());
+		if (r.getFiberUsedMtr() != null)
+			t.setFiberUsedMtr(r.getFiberUsedMtr());
+		if (r.getMediumJcBoxUsed() != null)
+			t.setMediumJcBoxUsed(r.getMediumJcBoxUsed());
+		if (r.getSmallJcBoxUsed() != null)
+			t.setSmallJcBoxUsed(r.getSmallJcBoxUsed());
+		if (r.getPatchCableUsed() != null)
+			t.setPatchCableUsed(r.getPatchCableUsed());
+		if (r.getCFieldNotes() != null)
+			t.setCFieldNotes(r.getCFieldNotes());
+		if (r.getCResolutionNotes() != null)
+			t.setCResolutionNotes(r.getCResolutionNotes());
+		if (r.getAcceptanceTimeMins() != null)
+			t.setAcceptanceTimeMins(r.getAcceptanceTimeMins());
+		if (r.getCSecondaryAssignedUserIds() != null) {
+			t.setCSecondaryUserIds(String.join(",", r.getCSecondaryAssignedUserIds()));
+		}
+		if (r.getCSecondaryAssignedUserNames() != null && !r.getCSecondaryAssignedUserNames().isEmpty()
+				&& r.getCSecondaryAssignedUserIds() != null) {
+			String names = r.getCSecondaryAssignedUserIds().stream()
+					.map(id -> r.getCSecondaryAssignedUserNames().getOrDefault(id, ""))
+					.collect(Collectors.joining(","));
+			t.setCSecondaryUserNames(names);
+		}
+	}
+
+	/**
+	 * Resolve account from parent — OHF circuit or EBB/MLL based on parentType.
+	 */
+	private void resolveAccount(Task t, TaskRequest req) {
+		if (req.getParentId() == null)
+			return;
+		// CORRECT — looks up the circuit, then gets account from it
+		if ("EBBMLLs".equals(req.getParentType())) {
+			ebbMllRepo.findById(req.getParentId()).ifPresent(e -> {
+				t.setAccountId(e.getAccountId());
+				t.setAccountName(e.getAccountName());
+			});
+		} else {
+			circuitRepo.findById(req.getParentId()).ifPresent(c -> {
+				t.setAccountId(c.getAccountId());
+				t.setAccountName(c.getAccountName());
+			});
+		}
+	}
+
+	private List<String> resolveSecondaryIds(Task saved, TaskRequest req) {
+		if (req.getCSecondaryAssignedUserIds() != null)
+			return req.getCSecondaryAssignedUserIds();
+		if (!isBlank(saved.getCSecondaryUserIds()))
+			return Arrays.asList(saved.getCSecondaryUserIds().split(","));
+		if (saved.getCSecondaryAssignedUserId() != null)
+			return List.of(saved.getCSecondaryAssignedUserId());
+		return List.of();
+	}
 
 	private String generateSRNumber() {
 		long count = taskRepo.count() + 1;
 		return "SR" + String.format("%04d", count);
 	}
 
-	private void validateMaterialOnComplete(Task current, TaskRequest req) {
-		String newStatus = req.getStatus();
-		if (!"Completed".equals(newStatus)) return;
-		String workType = req.getCWorkType() != null ? req.getCWorkType() : current.getCWorkType();
-		if ("Survey".equalsIgnoreCase(workType)) return;
-		String  ofcType    = req.getOfcType()         != null ? req.getOfcType()         : current.getOfcType();
-		Double  ofcStart   = req.getOfcStartingMtr()  != null ? req.getOfcStartingMtr()  : current.getOfcStartingMtr();
-		Double  ofcEnd     = req.getOfcEndingMtr()    != null ? req.getOfcEndingMtr()    : current.getOfcEndingMtr();
-		Integer mediumBox  = req.getMediumJcBoxUsed() != null ? req.getMediumJcBoxUsed() : current.getMediumJcBoxUsed();
-		Integer smallBox   = req.getSmallJcBoxUsed()  != null ? req.getSmallJcBoxUsed()  : current.getSmallJcBoxUsed();
-		Integer patchCable = req.getPatchCableUsed() != null ? req.getPatchCableUsed()  : current.getPatchCableUsed();
-		StringBuilder missing = new StringBuilder();
-		if (ofcType    == null || ofcType.isBlank()) missing.append("OFC Type, ");
-		if (ofcStart   == null) missing.append("OFC Starting Mtr, ");
-		if (ofcEnd     == null) missing.append("OFC Ending Mtr, ");
-		if (mediumBox  == null) missing.append("Medium JC Box Used, ");
-		if (smallBox   == null) missing.append("Small JC Box Used, ");
-		if (patchCable == null) missing.append("Patch Cable Used, ");
-		if (missing.length() > 0) {
-			String fields = missing.substring(0, missing.length() - 2);
-			throw new RuntimeException("Cannot complete task: Material Used fields are required — " + fields);
-		}
-	}
-
-	private void map(Task t, TaskRequest r) {
-		if (r.getName()          != null) t.setName(r.getName());
-		if (r.getStatus()        != null) t.setStatus(r.getStatus());
-		else if (t.getStatus()   == null) t.setStatus("New");
-		if (r.getPriority()      != null) t.setPriority(r.getPriority());
-		else if (t.getPriority() == null) t.setPriority("Normal");
-		if (r.getCWorkType()     != null) t.setCWorkType(r.getCWorkType());
-		if (r.getCRFO()          != null) t.setCRFO(r.getCRFO());
-		if (r.getParentId()      != null) t.setParentId(r.getParentId());
-		if (r.getParentType()    != null) t.setParentType(r.getParentType());
-		if (r.getParentName()    != null) t.setParentName(r.getParentName());
-		if (r.getDateStart()     != null) t.setDateStart(r.getDateStart());
-		if (r.getDateStartDate() != null) t.setDateStartDate(r.getDateStartDate());
-		if (r.getDateCompleted() != null) t.setDateCompleted(r.getDateCompleted());
-		if (r.getCDurationText() != null) t.setCDurationText(r.getCDurationText());
-		if (r.getDescription()   != null) t.setDescription(r.getDescription());
-		if (r.getCNote()         != null) t.setCNote(r.getCNote());
-		if (r.getAssignedUserId()   != null) t.setAssignedUserId(r.getAssignedUserId());
-		if (r.getAssignedUserName() != null) t.setAssignedUserName(r.getAssignedUserName());
-		if (r.getOfcType()         != null) t.setOfcType(r.getOfcType());
-		if (r.getOfcStartingMtr()  != null) t.setOfcStartingMtr(r.getOfcStartingMtr());
-		if (r.getOfcEndingMtr()    != null) t.setOfcEndingMtr(r.getOfcEndingMtr());
-		if (r.getFiberUsedMtr()    != null) t.setFiberUsedMtr(r.getFiberUsedMtr());
-		if (r.getMediumJcBoxUsed() != null) t.setMediumJcBoxUsed(r.getMediumJcBoxUsed());
-		if (r.getSmallJcBoxUsed()  != null) t.setSmallJcBoxUsed(r.getSmallJcBoxUsed());
-		if (r.getPatchCableUsed()  != null) t.setPatchCableUsed(r.getPatchCableUsed());
-		if (r.getCFieldNotes()     != null) t.setCFieldNotes(r.getCFieldNotes());
-		if (r.getCResolutionNotes() != null) t.setCResolutionNotes(r.getCResolutionNotes());
-		if (r.getAcceptanceTimeMins() != null) t.setAcceptanceTimeMins(r.getAcceptanceTimeMins());
-		// ── Multiple secondary users ───────────────────────────────────────────
-		if (r.getCSecondaryAssignedUserIds() != null) {
-			t.setCSecondaryUserIds(String.join(",", r.getCSecondaryAssignedUserIds()));
-		}
-		if (r.getCSecondaryAssignedUserNames() != null && !r.getCSecondaryAssignedUserNames().isEmpty()) {
-			// Preserve order matching IDs list
-			if (r.getCSecondaryAssignedUserIds() != null) {
-				String names = r.getCSecondaryAssignedUserIds().stream()
-						.map(id -> r.getCSecondaryAssignedUserNames().getOrDefault(id, ""))
-						.collect(Collectors.joining(","));
-				t.setCSecondaryUserNames(names);
-			}
-		}
-	}
-
-	/**
-	 * Resolve secondary user IDs for notifications. Use request value if provided;
-	 * fall back to what's stored in DB.
-	 */
-	private List<String> resolveSecondaryIds(Task saved, TaskRequest req) {
-		if (req.getCSecondaryAssignedUserIds() != null) {
-			return req.getCSecondaryAssignedUserIds();
-		}
-		if (saved.getCSecondaryUserIds() != null && !saved.getCSecondaryUserIds().isBlank()) {
-			return Arrays.asList(saved.getCSecondaryUserIds().split(","));
-		}
-		// Legacy single secondary
-		if (saved.getCSecondaryAssignedUserId() != null) {
-			return List.of(saved.getCSecondaryAssignedUserId());
-		}
-		return List.of();
-	}
-
 	private void saveCircuits(String taskId, List<String> ids, Map<String, String> names) {
-		if (ids == null || ids.isEmpty()) return;
+		if (ids == null || ids.isEmpty())
+			return;
 		Map<String, String> seen = new LinkedHashMap<>();
-		for (String cid : ids) {
+		for (String cid : ids)
 			seen.putIfAbsent(cid, names != null ? names.getOrDefault(cid, "") : "");
-		}
 		seen.forEach((cid, cname) -> taskCircuitRepo.save(new TaskCircuit(null, taskId, cid, cname)));
 	}
 
 	private void saveEbbMlls(String taskId, List<String> ids, Map<String, String> names) {
-		if (ids == null || ids.isEmpty()) return;
+		if (ids == null || ids.isEmpty())
+			return;
 		Map<String, String> seen = new LinkedHashMap<>();
-		for (String eid : ids) {
+		for (String eid : ids)
 			seen.putIfAbsent(eid, names != null ? names.getOrDefault(eid, "") : "");
-		}
 		seen.forEach((eid, ename) -> taskEbbMllRepo.save(new TaskEbbMll(null, taskId, eid, ename)));
 	}
 
@@ -663,70 +733,56 @@ public class TaskService {
 	private TaskResponse toResponseFromDb(Task t) {
 		TaskResponse res = baseFields(t);
 
-		// ── OHF Circuits (with live name fallback) ────────────────────────────
+		// OHF Circuits
 		List<TaskCircuit> circuits = taskCircuitRepo.findByTaskId(t.getId());
-		res.setCOHFCircuitsesIds(circuits.stream()
-				.map(TaskCircuit::getCircuitId)
-				.filter(Objects::nonNull)
-				.distinct()
+		res.setCOHFCircuitsesIds(circuits.stream().map(TaskCircuit::getCircuitId).filter(Objects::nonNull).distinct()
 				.collect(Collectors.toList()));
-
-		Map<String, String> circuitNamesMap = new LinkedHashMap<>();
+		Map<String, String> circuitNames = new LinkedHashMap<>();
 		for (TaskCircuit c : circuits) {
-			if (c.getCircuitId() == null) continue;
+			if (c.getCircuitId() == null)
+				continue;
 			String name = c.getCircuitName();
-			if (name == null || name.isBlank()) {
-				name = circuitRepo.findById(c.getCircuitId())
-						.map(ohf -> ohf.getName())
-						.orElse(c.getCircuitId());
-			}
-			circuitNamesMap.putIfAbsent(c.getCircuitId(), name);
+			if (isBlank(name))
+				name = circuitRepo.findById(c.getCircuitId()).map(OhfCircuit::getName).orElse(c.getCircuitId());
+			circuitNames.putIfAbsent(c.getCircuitId(), name);
 		}
-		res.setCOHFCircuitsesNames(circuitNamesMap);
+		res.setCOHFCircuitsesNames(circuitNames);
 
-		// ── EBB / MLL (with live name fallback) ───────────────────────────────
+		// EBB/MLL
 		List<TaskEbbMll> ebbMlls = taskEbbMllRepo.findByTaskId(t.getId());
-		res.setCEBBMLLsIds(ebbMlls.stream()
-				.map(TaskEbbMll::getEbbMllId)
-				.filter(Objects::nonNull)
-				.distinct()
+		res.setCEBBMLLsIds(ebbMlls.stream().map(TaskEbbMll::getEbbMllId).filter(Objects::nonNull).distinct()
 				.collect(Collectors.toList()));
-
-		Map<String, String> ebbMllNamesMap = new LinkedHashMap<>();
+		Map<String, String> ebbNames = new LinkedHashMap<>();
 		for (TaskEbbMll e : ebbMlls) {
-			if (e.getEbbMllId() == null) continue;
+			if (e.getEbbMllId() == null)
+				continue;
 			String name = e.getEbbMllName();
-			if (name == null || name.isBlank()) {
-				name = ebbMllRepo.findById(e.getEbbMllId())
-						.map(EbbMll::getName)
-						.orElse(e.getEbbMllId());
-			}
-			ebbMllNamesMap.putIfAbsent(e.getEbbMllId(), name);
+			if (isBlank(name))
+				name = ebbMllRepo.findById(e.getEbbMllId()).map(EbbMll::getName).orElse(e.getEbbMllId());
+			ebbNames.putIfAbsent(e.getEbbMllId(), name);
 		}
-		res.setCEBBMLLsNames(ebbMllNamesMap);
+		res.setCEBBMLLsNames(ebbNames);
 
-		// ── Attachments — derived from `attachments` table ────────────────────
-		List<Attachment> taskAttachments =
-				attachmentRepo.findByRelatedIdAndRelatedType(t.getId(), "Task");
+		// Attachments
+		List<Attachment> atts = attachmentRepo.findByRelatedIdAndRelatedType(t.getId(), "Task");
+		res.setAttachmentsIds(
+				atts.stream().map(Attachment::getId).filter(Objects::nonNull).collect(Collectors.toList()));
+		Map<String, String> attNames = new LinkedHashMap<>();
+		Map<String, String> attTypes = new LinkedHashMap<>();
+		for (Attachment a : atts) {
+			if (a.getId() == null)
+				continue;
+			if (a.getName() != null)
+				attNames.put(a.getId(), a.getName());
+			if (a.getType() != null)
+				attTypes.put(a.getId(), a.getType());
+		}
+		res.setAttachmentsNames(attNames);
+		res.setAttachmentsTypes(attTypes);
 
-		res.setAttachmentsIds(taskAttachments.stream()
-				.map(Attachment::getId)
-				.filter(Objects::nonNull)
+		// Stream
+		res.setStream(taskCommentRepo.findByTaskIdOrderByCreatedAtAsc(t.getId()).stream().map(this::toCommentDto)
 				.collect(Collectors.toList()));
-
-		Map<String, String> attachNames = new LinkedHashMap<>();
-		Map<String, String> attachTypes = new LinkedHashMap<>();
-		for (Attachment a : taskAttachments) {
-			if (a.getId() == null) continue;
-			if (a.getName() != null) attachNames.put(a.getId(), a.getName());
-			if (a.getType() != null) attachTypes.put(a.getId(), a.getType());
-		}
-		res.setAttachmentsNames(attachNames);
-		res.setAttachmentsTypes(attachTypes);
-
-		// ── Stream / Comments ─────────────────────────────────────────────────
-		List<TaskComment> comments = commentRepo.findByTaskIdOrderByCreatedAtAsc(t.getId());
-		res.setStream(comments.stream().map(this::toCommentDto).collect(Collectors.toList()));
 
 		return res;
 	}
@@ -760,23 +816,27 @@ public class TaskService {
 		res.setMediumJcBoxUsed(t.getMediumJcBoxUsed());
 		res.setSmallJcBoxUsed(t.getSmallJcBoxUsed());
 		res.setPatchCableUsed(t.getPatchCableUsed());
+		res.setCFieldNotes(t.getCFieldNotes());
+		res.setCResolutionNotes(t.getCResolutionNotes());
 		res.setCreatedAt(t.getCreatedAt());
 		res.setModifiedAt(t.getModifiedAt());
 		res.setCreatedById(t.getCreatedById());
 		res.setCreatedByName(t.getCreatedByName());
-		res.setCFieldNotes(t.getCFieldNotes());
-		res.setCResolutionNotes(t.getCResolutionNotes());
-		// ── Multiple secondary users ───────────────────────────────────────────
-		if (t.getCSecondaryUserIds() != null && !t.getCSecondaryUserIds().isBlank()) {
+		res.setAcceptanceTimeMins(t.getAcceptanceTimeMins());
+		res.setAcceptedAt(t.getAcceptedAt());
+		res.setAcceptedById(t.getAcceptedById());
+		res.setAcceptedByName(t.getAcceptedByName());
+
+		// Secondary users
+		if (!isBlank(t.getCSecondaryUserIds())) {
 			List<String> ids = Arrays.asList(t.getCSecondaryUserIds().split(","));
 			res.setCSecondaryAssignedUserIds(ids);
 			if (t.getCSecondaryUserNames() != null) {
 				String[] names = t.getCSecondaryUserNames().split(",", -1);
-				Map<String, String> namesMap = new LinkedHashMap<>();
-				for (int i = 0; i < ids.size(); i++) {
-					namesMap.put(ids.get(i), i < names.length ? names[i] : ids.get(i));
-				}
-				res.setCSecondaryAssignedUserNames(namesMap);
+				Map<String, String> map = new LinkedHashMap<>();
+				for (int i = 0; i < ids.size(); i++)
+					map.put(ids.get(i), i < names.length ? names[i] : ids.get(i));
+				res.setCSecondaryAssignedUserNames(map);
 			} else {
 				res.setCSecondaryAssignedUserNames(Map.of());
 			}
@@ -796,10 +856,6 @@ public class TaskService {
 		res.setAttachmentsIds(List.of());
 		res.setAttachmentsNames(Map.of());
 		res.setAttachmentsTypes(Map.of());
-		res.setAcceptanceTimeMins(t.getAcceptanceTimeMins());
-		res.setAcceptedAt(t.getAcceptedAt());
-		res.setAcceptedById(t.getAcceptedById());
-		res.setAcceptedByName(t.getAcceptedByName());
 		res.setStream(List.of());
 		return res;
 	}
@@ -819,6 +875,27 @@ public class TaskService {
 
 	// ── UTILS ─────────────────────────────────────────────────────────────────
 
+	private String currentUserId() {
+		try {
+			var auth = SecurityContextHolder.getContext().getAuthentication();
+			if (auth != null && auth.getPrincipal() instanceof String uid && !uid.isBlank())
+				return uid;
+		} catch (Exception ignored) {
+		}
+		return null;
+	}
+
+	private String currentUserName() {
+		try {
+			String uid = currentUserId();
+			if (uid == null)
+				return null;
+			return userRepo.findById(uid).map(u -> u.getName() != null ? u.getName() : u.getUserName()).orElse(null);
+		} catch (Exception ignored) {
+			return null;
+		}
+	}
+
 	private static String coalesce(String a, String b) {
 		return a != null ? a : b;
 	}
@@ -829,5 +906,23 @@ public class TaskService {
 
 	private static String esc(String s) {
 		return s == null ? "" : s.replace("\"", "\\\"");
+	}
+
+	private static String pickStr(String req, String db) {
+		return !isBlank(req) ? req : db;
+	}
+
+	private static Double pickDbl(Double req, Double db) {
+		return req != null ? req : db;
+	}
+
+	private static Integer pickInt(Integer req, Integer db) {
+		return req != null ? req : db;
+	}
+
+	private static String fmtNum(Double d) {
+		if (d == null)
+			return "—";
+		return (d == Math.floor(d) && !Double.isInfinite(d)) ? String.valueOf(d.longValue()) : String.valueOf(d);
 	}
 }

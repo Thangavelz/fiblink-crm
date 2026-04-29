@@ -14,6 +14,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import jakarta.servlet.http.HttpServletResponse;
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/tasks")
@@ -27,6 +28,13 @@ public class TaskController {
     public TaskResponse create(@RequestBody TaskRequest req, Authentication auth) {
         requireRole(auth, "ROLE_ADMIN", "ROLE_MANAGER");
         return service.create(req);
+    }
+    
+ // ── ACCEPT — ALL roles ───────────────────────────────────────────────────
+    @PostMapping("/{id}/accept")
+    public TaskResponse accept(@PathVariable("id") String id,
+                               @RequestBody(required = false) Map<String, String> body) {
+        return service.acceptTask(id);
     }
 
     // ── GET (single) — all authenticated roles ────────────────────────────────

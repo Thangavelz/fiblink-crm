@@ -19,6 +19,7 @@ public class InventoryService {
     private final InventoryItemRepository        itemRepo;
     private final InventoryStockRepository       stockRepo;
     private final InventoryTransactionRepository txnRepo;
+    private final UserRepository                 userRepo;   // ← to resolve name from userId
 
     // ─── Inventory Items (catalogue) ────────────────────────────────────────
 
@@ -55,15 +56,16 @@ public class InventoryService {
         return toItemResponse(itemRepo.save(item));
     }
 
-    // ─── Inward Entry (stock received) ──────────────────────────────────────
+    // ─── Inward Entry ────────────────────────────────────────────────────────
 
     @Transactional
     public InventoryTransactionResponse recordInward(InwardRequest req) {
         if (req.getQuantity() == null || req.getQuantity() <= 0)
             throw new RuntimeException("Quantity must be positive");
 
-        InventoryItem item = itemRepo.findById(req.getItemId())
-                .orElseThrow(() -> new RuntimeException("Item not found: " + req.getItemId()));
+        // Item may be a fixed catalogue id (e.g. "ofc-4f") — tolerate missing
+        String itemName = req.getItemName() != null ? req.getItemName() : req.getItemId();
+        String itemType = resolveItemType(req.getItemId());
 
         InventoryStock stock = stockRepo
                 .findByItemIdAndStoreAreaCode(req.getItemId(), req.getStoreAreaCode())
@@ -72,54 +74,59 @@ public class InventoryService {
                     s.setId(UUID.randomUUID().toString());
                     s.setItemId(req.getItemId());
                     s.setStoreAreaCode(req.getStoreAreaCode());
+                    s.setStoreName(req.getStoreName());
                     s.setQuantityOnHand(0.0);
                     return s;
                 });
+
+        // Update store name if provided
+        if (req.getStoreName() != null) stock.setStoreName(req.getStoreName());
 
         double after = stock.getQuantityOnHand() + req.getQuantity();
         stock.setQuantityOnHand(after);
         stockRepo.save(stock);
 
-        return saveTransaction("INWARD", item, stock, req.getQuantity(), after,
+        return saveTransaction("INWARD", req.getItemId(), itemName,
+                stock.getStoreAreaCode(), stock.getStoreName(),
+                req.getQuantity(), after,
                 null, null, req.getNotes());
     }
 
-    // ─── Usage Entry (material used in task) ────────────────────────────────
+    // ─── Usage Entry ─────────────────────────────────────────────────────────
 
     @Transactional
     public InventoryTransactionResponse recordUsage(UsageRequest req) {
         if (req.getQuantity() == null || req.getQuantity() <= 0)
             throw new RuntimeException("Quantity must be positive");
 
-        InventoryItem item = itemRepo.findById(req.getItemId())
-                .orElseThrow(() -> new RuntimeException("Item not found: " + req.getItemId()));
+        String itemName = req.getItemId() != null ? req.getItemId() : req.getItemId();
 
         InventoryStock stock = stockRepo
                 .findByItemIdAndStoreAreaCode(req.getItemId(), req.getStoreAreaCode())
                 .orElseThrow(() -> new RuntimeException(
-                        "No stock record for item " + req.getItemId() + " in store " + req.getStoreAreaCode()));
+                        "No stock for item " + req.getItemId()
+                        + " in store " + req.getStoreAreaCode()));
 
         if (stock.getQuantityOnHand() < req.getQuantity())
             throw new RuntimeException("Insufficient stock: available "
-                    + stock.getQuantityOnHand() + " " + item.getUnit());
+                    + stock.getQuantityOnHand());
 
         double after = stock.getQuantityOnHand() - req.getQuantity();
         stock.setQuantityOnHand(after);
         stockRepo.save(stock);
 
-        return saveTransaction("USAGE", item, stock, -req.getQuantity(), after,
+        return saveTransaction("USAGE", req.getItemId(), itemName,
+                stock.getStoreAreaCode(), stock.getStoreName(),
+                -req.getQuantity(), after,
                 req.getTaskId(), req.getTaskName(), req.getNotes());
     }
 
-    // ─── Stock Query ─────────────────────────────────────────────────────────
+    // ─── Stock Query ──────────────────────────────────────────────────────────
 
     public List<InventoryStockResponse> listStock(String storeAreaCode, String itemType) {
-        List<InventoryStock> stocks;
-        if (storeAreaCode != null) {
-            stocks = stockRepo.findByStoreAreaCode(storeAreaCode);
-        } else {
-            stocks = stockRepo.findAll();
-        }
+        List<InventoryStock> stocks = storeAreaCode != null
+                ? stockRepo.findByStoreAreaCode(storeAreaCode)
+                : stockRepo.findAll();
 
         return stocks.stream()
                 .filter(s -> {
@@ -131,7 +138,7 @@ public class InventoryService {
                 .collect(Collectors.toList());
     }
 
-    // ─── Audit Log ───────────────────────────────────────────────────────────
+    // ─── Audit Log ────────────────────────────────────────────────────────────
 
     public List<InventoryTransactionResponse> listTransactions(
             String storeAreaCode, String itemId, String txnType) {
@@ -148,27 +155,24 @@ public class InventoryService {
         return txns.stream().map(this::toTxnResponse).collect(Collectors.toList());
     }
 
-    // ─── Dashboard Summary ───────────────────────────────────────────────────
+    // ─── Summary ──────────────────────────────────────────────────────────────
 
     public java.util.Map<String, Object> summary(String storeAreaCode) {
         List<InventoryStock> stocks = storeAreaCode != null
                 ? stockRepo.findByStoreAreaCode(storeAreaCode)
                 : stockRepo.findAll();
 
-        long totalItems     = stocks.size();
-        long lowStockItems  = stocks.stream()
-                .filter(s -> s.getReorderLevel() != null && s.getQuantityOnHand() <= s.getReorderLevel())
+        long totalItems    = stocks.size();
+        long lowStockItems = stocks.stream()
+                .filter(s -> s.getReorderLevel() != null
+                          && s.getQuantityOnHand() <= s.getReorderLevel())
                 .count();
-        long ofcStocks      = stocks.stream()
-                .filter(s -> {
-                    InventoryItem it = itemRepo.findById(s.getItemId()).orElse(null);
-                    return it != null && "OFC_CABLE".equals(it.getItemType());
-                }).count();
-        long jcvStocks      = stocks.stream()
-                .filter(s -> {
-                    InventoryItem it = itemRepo.findById(s.getItemId()).orElse(null);
-                    return it != null && "JCV_BOX".equals(it.getItemType());
-                }).count();
+        long ofcStocks = stocks.stream()
+                .filter(s -> "OFC_CABLE".equals(resolveItemType(s.getItemId())))
+                .count();
+        long jcvStocks = stocks.stream()
+                .filter(s -> "JCV_BOX".equals(resolveItemType(s.getItemId())))
+                .count();
 
         return java.util.Map.of(
                 "totalItems",    totalItems,
@@ -178,78 +182,88 @@ public class InventoryService {
         );
     }
 
-    // ─── Internals ───────────────────────────────────────────────────────────
+    // ─── Internals ────────────────────────────────────────────────────────────
 
+    /**
+     * Saves an audit transaction row.
+     * Reads the current authenticated user from Spring Security context.
+     * JwtAuthFilter sets principal = userId (String), so we look up the name.
+     */
     private InventoryTransactionResponse saveTransaction(
-            String txnType, InventoryItem item, InventoryStock stock,
+            String txnType,
+            String itemId, String itemName,
+            String storeAreaCode, String storeName,
             double change, double after,
-            String taskId, String taskName, String notes) {
+            String taskId, String taskName,
+            String notes) {
 
-        String userId   = currentUserId();
-        String userName = currentUserName();
+        // ── Resolve current user from Security context ──
+        // JwtAuthFilter sets principal = userId String (not a User entity)
+        String performedById   = null;
+        String performedByName = null;
+        try {
+            var auth = SecurityContextHolder.getContext().getAuthentication();
+            if (auth != null && auth.getPrincipal() instanceof String uid && !uid.isBlank()) {
+                performedById = uid;
+                // Look up full name from DB
+                performedByName = userRepo.findById(uid)
+                        .map(u -> u.getName() != null ? u.getName() : u.getUserName())
+                        .orElse(uid);
+            }
+        } catch (Exception ignored) {}
 
         InventoryTransaction txn = new InventoryTransaction();
         txn.setId(UUID.randomUUID().toString());
         txn.setTxnType(txnType);
-        txn.setItemId(item.getId());
-        txn.setItemName(item.getItemName());
-        txn.setStoreAreaCode(stock.getStoreAreaCode());
-        txn.setStoreName(stock.getStoreName());
+        txn.setItemId(itemId);
+        txn.setItemName(itemName);
+        txn.setStoreAreaCode(storeAreaCode);
+        txn.setStoreName(storeName);
         txn.setQuantityChange(change);
         txn.setQuantityAfter(after);
         txn.setTaskId(taskId);
         txn.setTaskName(taskName);
-        txn.setPerformedById(userId);
-        txn.setPerformedByName(userName);
+        txn.setPerformedById(performedById);
+        txn.setPerformedByName(performedByName);
         txn.setNotes(notes);
 
         return toTxnResponse(txnRepo.save(txn));
     }
 
+    /** Resolve item type from DB, or fall back to id prefix for fixed catalogue */
+    private String resolveItemType(String itemId) {
+        if (itemId == null) return null;
+        return itemRepo.findById(itemId)
+                .map(InventoryItem::getItemType)
+                .orElseGet(() -> {
+                    if (itemId.startsWith("ofc-")) return "OFC_CABLE";
+                    if (itemId.startsWith("jcv-")) return "JCV_BOX";
+                    return null;
+                });
+    }
+
     private void mapItem(InventoryItem item, InventoryItemRequest req) {
-        if (req.getItemType()   != null) item.setItemType(req.getItemType());
-        if (req.getItemName()   != null) item.setItemName(req.getItemName());
-        if (req.getCableType()  != null) item.setCableType(req.getCableType());
-        if (req.getCoreCount()  != null) item.setCoreCount(req.getCoreCount());
-        if (req.getBoxSize()    != null) item.setBoxSize(req.getBoxSize());
-        if (req.getUnit()       != null) item.setUnit(req.getUnit());
-        if (req.getDescription()!= null) item.setDescription(req.getDescription());
-        if (req.getIsActive()   != null) item.setIsActive(req.getIsActive());
+        if (req.getItemType()    != null) item.setItemType(req.getItemType());
+        if (req.getItemName()    != null) item.setItemName(req.getItemName());
+        if (req.getCableType()   != null) item.setCableType(req.getCableType());
+        if (req.getCoreCount()   != null) item.setCoreCount(req.getCoreCount());
+        if (req.getBoxSize()     != null) item.setBoxSize(req.getBoxSize());
+        if (req.getUnit()        != null) item.setUnit(req.getUnit());
+        if (req.getDescription() != null) item.setDescription(req.getDescription());
+        if (req.getIsActive()    != null) item.setIsActive(req.getIsActive());
         else if (item.getIsActive() == null) item.setIsActive(true);
-        if (item.getUnit() == null) {
+        if (item.getUnit() == null)
             item.setUnit("OFC_CABLE".equals(item.getItemType()) ? "MTR" : "PCS");
-        }
     }
 
-    private String currentUserId() {
-        try {
-            var auth = SecurityContextHolder.getContext().getAuthentication();
-            if (auth == null) return null;
-            Object p = auth.getPrincipal();
-            if (p instanceof com.cableops.tracker.entity.User u) return u.getId();
-        } catch (Exception ignored) {}
-        return null;
-    }
-
-    private String currentUserName() {
-        try {
-            var auth = SecurityContextHolder.getContext().getAuthentication();
-            if (auth == null) return null;
-            Object p = auth.getPrincipal();
-            if (p instanceof com.cableops.tracker.entity.User u)
-                return u.getName() != null ? u.getName() : u.getUserName();
-        } catch (Exception ignored) {}
-        return null;
-    }
-
-    // ─── Mappers ─────────────────────────────────────────────────────────────
+    // ─── Mappers ──────────────────────────────────────────────────────────────
 
     private InventoryItemResponse toItemResponse(InventoryItem i) {
         InventoryItemResponse r = new InventoryItemResponse();
-        r.setId(i.getId()); r.setItemType(i.getItemType());
+        r.setId(i.getId());           r.setItemType(i.getItemType());
         r.setItemName(i.getItemName()); r.setCableType(i.getCableType());
         r.setCoreCount(i.getCoreCount()); r.setBoxSize(i.getBoxSize());
-        r.setUnit(i.getUnit()); r.setDescription(i.getDescription());
+        r.setUnit(i.getUnit());       r.setDescription(i.getDescription());
         r.setIsActive(i.getIsActive());
         r.setCreatedAt(i.getCreatedAt()); r.setUpdatedAt(i.getUpdatedAt());
         return r;
@@ -258,28 +272,35 @@ public class InventoryService {
     private InventoryStockResponse toStockResponse(InventoryStock s) {
         InventoryItem item = itemRepo.findById(s.getItemId()).orElse(null);
         InventoryStockResponse r = new InventoryStockResponse();
-        r.setId(s.getId()); r.setItemId(s.getItemId());
+        r.setId(s.getId());           r.setItemId(s.getItemId());
         r.setStoreAreaCode(s.getStoreAreaCode()); r.setStoreName(s.getStoreName());
         r.setQuantityOnHand(s.getQuantityOnHand()); r.setReorderLevel(s.getReorderLevel());
         r.setUpdatedAt(s.getUpdatedAt());
         if (item != null) {
             r.setItemName(item.getItemName()); r.setItemType(item.getItemType());
             r.setCableType(item.getCableType()); r.setCoreCount(item.getCoreCount());
-            r.setBoxSize(item.getBoxSize()); r.setUnit(item.getUnit());
+            r.setBoxSize(item.getBoxSize());   r.setUnit(item.getUnit());
+        } else {
+            // Fixed catalogue fallback — item may not be in inventory_items table
+            r.setItemName(s.getItemId());
+            r.setItemType(resolveItemType(s.getItemId()));
+            r.setUnit(s.getItemId().startsWith("ofc-") ? "MTR" : "PCS");
         }
-        r.setLowStock(s.getReorderLevel() != null && s.getQuantityOnHand() <= s.getReorderLevel());
+        r.setLowStock(s.getReorderLevel() != null
+                && s.getQuantityOnHand() <= s.getReorderLevel());
         return r;
     }
 
     private InventoryTransactionResponse toTxnResponse(InventoryTransaction t) {
         InventoryTransactionResponse r = new InventoryTransactionResponse();
-        r.setId(t.getId()); r.setTxnType(t.getTxnType());
-        r.setItemId(t.getItemId()); r.setItemName(t.getItemName());
+        r.setId(t.getId());             r.setTxnType(t.getTxnType());
+        r.setItemId(t.getItemId());     r.setItemName(t.getItemName());
         r.setStoreAreaCode(t.getStoreAreaCode()); r.setStoreName(t.getStoreName());
         r.setQuantityChange(t.getQuantityChange()); r.setQuantityAfter(t.getQuantityAfter());
-        r.setTaskId(t.getTaskId()); r.setTaskName(t.getTaskName());
-        r.setPerformedById(t.getPerformedById()); r.setPerformedByName(t.getPerformedByName());
-        r.setNotes(t.getNotes()); r.setCreatedAt(t.getCreatedAt());
+        r.setTaskId(t.getTaskId());     r.setTaskName(t.getTaskName());
+        r.setPerformedById(t.getPerformedById());
+        r.setPerformedByName(t.getPerformedByName());
+        r.setNotes(t.getNotes());       r.setCreatedAt(t.getCreatedAt());
         return r;
     }
 }

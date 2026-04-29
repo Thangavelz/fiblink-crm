@@ -16,22 +16,21 @@ public class InventoryStockController {
  
     private final InventoryService service;
  
-    /** Current stock levels, optionally filtered by store or item type */
     @GetMapping("/stock")
     public List<InventoryStockResponse> stock(
-            @RequestParam(required = false) String storeAreaCode,
-            @RequestParam(required = false) String itemType,
+            @RequestParam(name = "storeAreaCode", required = false) String storeAreaCode,
+            @RequestParam(name = "itemType",      required = false) String itemType,
             HttpServletResponse response) {
+ 
         List<InventoryStockResponse> list = service.listStock(storeAreaCode, itemType);
         response.setHeader("X-Total-Count", String.valueOf(list.size()));
         response.setHeader("Access-Control-Expose-Headers", "X-Total-Count");
         return list;
     }
  
-    /** Dashboard summary counts */
     @GetMapping("/summary")
     public Map<String, Object> summary(
-            @RequestParam(required = false) String storeAreaCode) {
+            @RequestParam(name = "storeAreaCode", required = false) String storeAreaCode) {
         return service.summary(storeAreaCode);
     }
 }
