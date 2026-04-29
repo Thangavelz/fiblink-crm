@@ -66,6 +66,7 @@ public class TaskService {
 	}
 
 	// ── CREATE ────────────────────────────────────────────────────────────────
+
 	@Transactional
 	public TaskResponse create(TaskRequest req) {
 		Task t = new Task();
@@ -74,15 +75,16 @@ public class TaskService {
 		t.setCreatedAt(LocalDateTime.now());
 		t.setModifiedAt(LocalDateTime.now());
 		map(t, req);
-		resolveAccount(t, req);
+
+		// ── Resolve account from parent ───────────────────────────────────────────
+		resolveAccount(t, req.getParentId(), req.getParentType(), req.getDescription());
 
 		taskRepo.save(t);
 		saveCircuits(t.getId(), req.getCOHFCircuitsesIds(), req.getCOHFCircuitsesNames());
 		saveEbbMlls(t.getId(), req.getCEBBMLLsIds(), req.getCEBBMLLsNames());
 		linkAttachmentsToTask(t.getId(), req.getAttachmentsIds());
-		addSystemComment(t, "create", null, currentUserId(), currentUserName());
+		logCreate(t.getId(), req);
 
-		// Telegram
 		String msg = buildCreateMessage(t, req);
 		notifyAllUsers(req.getAssignedUserId(), req.getCSecondaryAssignedUserIds(), msg);
 		notifyAccountGroup(t.getAccountId(), msg);
@@ -132,7 +134,10 @@ public class TaskService {
 
 		Map<String, Boolean> changed = detectChanges(old, req);
 		map(old, req);
-		resolveAccount(old, req);
+		resolveAccount(old, req.getParentId() != null ? req.getParentId() : old.getParentId(),
+				req.getParentType() != null ? req.getParentType() : old.getParentType(),
+				req.getDescription() != null ? req.getDescription() : old.getDescription());
+
 		old.setModifiedAt(LocalDateTime.now());
 		taskRepo.save(old);
 
@@ -678,21 +683,72 @@ public class TaskService {
 	/**
 	 * Resolve account from parent — OHF circuit or EBB/MLL based on parentType.
 	 */
-	private void resolveAccount(Task t, TaskRequest req) {
-		if (req.getParentId() == null)
+	private void resolveAccount(Task t, String parentId, String parentType, String description) {
+		if (parentId == null || parentId.isBlank())
 			return;
-		// CORRECT — looks up the circuit, then gets account from it
-		if ("EBBMLLs".equals(req.getParentType())) {
-			ebbMllRepo.findById(req.getParentId()).ifPresent(e -> {
-				t.setAccountId(e.getAccountId());
-				t.setAccountName(e.getAccountName());
+
+		if ("EBBMLLs".equals(parentType)) {
+			ebbMllRepo.findById(parentId).ifPresent(e -> {
+				if (e.getAccountId() != null) {
+					t.setAccountId(e.getAccountId());
+					t.setAccountName(e.getAccountName());
+				}
 			});
 		} else {
-			circuitRepo.findById(req.getParentId()).ifPresent(c -> {
-				t.setAccountId(c.getAccountId());
-				t.setAccountName(c.getAccountName());
+			// COHFCircuits or legacy null parentType
+			circuitRepo.findById(parentId).ifPresent(c -> {
+				if (c.getAccountId() != null) {
+					t.setAccountId(c.getAccountId());
+					t.setAccountName(c.getAccountName());
+				}
 			});
 		}
+	}
+
+	private void logCreate(String taskId, TaskRequest req) {
+		String actorId = currentUserId();
+		String actorName = currentUserName();
+
+		// Fall back to assigned user name for the message text (existing behaviour)
+		String assignedName = req.getAssignedUserName() != null ? req.getAssignedUserName() : "Unassigned";
+
+		TaskComment c = new TaskComment();
+		c.setId(UUID.randomUUID().toString());
+		c.setTaskId(taskId);
+		c.setUserId(actorId);
+		c.setUserName(actorName);
+		c.setType("create");
+		c.setData("{\"assignedTo\":\"" + esc(assignedName) + "\"," + "\"status\":\""
+				+ esc(coalesce(req.getStatus(), "New")) + "\"}");
+		c.setCreatedAt(LocalDateTime.now());
+		taskCommentRepo.save(c);
+	}
+
+// ── Also fix logStatus and logUpdate similarly ────────────────────────────────
+
+	private void logStatus(String taskId, TaskRequest req, String newStatus) {
+		TaskComment c = buildLog(taskId, currentUserId(), currentUserName(), "status",
+				"{\"status\":\"" + esc(newStatus) + "\"}");
+		taskCommentRepo.save(c);
+	}
+
+	private void logUpdate(String taskId, TaskRequest req, List<String> fields) {
+		String fieldsJson = fields.stream().map(f -> "\"" + esc(f) + "\"").collect(Collectors.joining(",", "[", "]"));
+		TaskComment c = buildLog(taskId, currentUserId(), currentUserName(), "update",
+				"{\"fields\":" + fieldsJson + "}");
+		taskCommentRepo.save(c);
+	}
+
+	private TaskComment buildLog(String taskId, String userId, String userName, String type, String data) {
+		TaskComment c = new TaskComment();
+		c.setId(UUID.randomUUID().toString());
+		c.setTaskId(taskId);
+		c.setUserId(userId);
+		c.setUserName(userName);
+		c.setType(type);
+		c.setData(data);
+		c.setCreatedAt(LocalDateTime.now());
+		return c;
 	}
 
 	private List<String> resolveSecondaryIds(Task saved, TaskRequest req) {
