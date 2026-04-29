@@ -29,8 +29,8 @@ public class TaskController {
         requireRole(auth, "ROLE_ADMIN", "ROLE_MANAGER");
         return service.create(req);
     }
-    
- // ── ACCEPT — ALL roles ───────────────────────────────────────────────────
+
+    // ── ACCEPT — ALL roles ───────────────────────────────────────────────────
     @PostMapping("/{id}/accept")
     public TaskResponse accept(@PathVariable("id") String id,
                                @RequestBody(required = false) Map<String, String> body) {
@@ -51,9 +51,18 @@ public class TaskController {
             @RequestParam(name = "accountId",      required = false) String accountId,
             @RequestParam(name = "_start",         required = false) Integer start,
             @RequestParam(name = "_end",           required = false) Integer end,
+            Authentication auth,
             HttpServletResponse response) {
 
-        List<TaskResponse> all = service.list(status, assignedUserId, accountId);
+        // Field Engineer: automatically scope to tasks where they are
+        // primary OR secondary assigned user — ignore any client-passed filter.
+        List<TaskResponse> all;
+        if (hasRole(auth, "ROLE_FIELD_ENGINEER")) {
+            String userId = auth.getName(); // JwtAuthFilter sets principal = userId
+            all = service.listForUser(userId);
+        } else {
+            all = service.list(status, assignedUserId, accountId);
+        }
 
         response.setHeader("X-Total-Count", String.valueOf(all.size()));
         response.setHeader("Access-Control-Expose-Headers", "X-Total-Count");
@@ -74,16 +83,27 @@ public class TaskController {
 
         if (hasRole(auth, "ROLE_FIELD_ENGINEER")) {
             // Field Engineer: may only update status and field-level notes.
-            // Pass a stripped copy so they cannot reassign or change other metadata.
             TaskRequest stripped = new TaskRequest();
             stripped.setStatus(req.getStatus());
+            stripped.setCNote(req.getCNote());
             stripped.setCFieldNotes(req.getCFieldNotes());
             stripped.setCResolutionNotes(req.getCResolutionNotes());
+            stripped.setOfcType(req.getOfcType());
+            stripped.setOfcStartingMtr(req.getOfcStartingMtr());
+            stripped.setOfcEndingMtr(req.getOfcEndingMtr());
+            stripped.setFiberUsedMtr(req.getFiberUsedMtr());
+            stripped.setMediumJcBoxUsed(req.getMediumJcBoxUsed());
+            stripped.setSmallJcBoxUsed(req.getSmallJcBoxUsed());
+            stripped.setPatchCableUsed(req.getPatchCableUsed());
+            stripped.setDateCompleted(req.getDateCompleted());
+            stripped.setAttachmentsIds(req.getAttachmentsIds());
+            stripped.setAttachmentsNames(req.getAttachmentsNames());
+            stripped.setAttachmentsTypes(req.getAttachmentsTypes());
             return service.update(id, stripped);
         }
 
         if (hasRole(auth, "ROLE_MANAGER")) {
-            // Manager: full update including reassign (assignedUserId / assignedUserName)
+            // Manager: full update including reassign
             return service.update(id, req);
         }
 

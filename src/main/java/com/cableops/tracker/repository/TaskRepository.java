@@ -3,6 +3,7 @@ package com.cableops.tracker.repository;
 import com.cableops.tracker.entity.Task;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import java.util.List;
 
 public interface TaskRepository extends JpaRepository<Task, String> {
@@ -15,6 +16,16 @@ public interface TaskRepository extends JpaRepository<Task, String> {
 	List<Task> findByAccountId(String accountId);
 
 	List<Task> findByParentType(String parentType);
+
+	/**
+	 * Find all tasks where userId is either the primary assigned user
+	 * OR appears in the comma-separated cSecondaryUserIds column.
+	 * Used by Field Engineer role to see all their tasks.
+	 */
+	@Query("SELECT t FROM Task t WHERE " +
+	       "t.assignedUserId = :userId OR " +
+	       "t.cSecondaryUserIds LIKE CONCAT('%', :userId, '%')")
+	List<Task> findByAssignedUserIdOrSecondary(@Param("userId") String userId);
 
 	/**
 	 * Find tasks that: - have an acceptance SLA set - have NOT been accepted yet

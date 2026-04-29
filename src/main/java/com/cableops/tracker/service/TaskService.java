@@ -732,6 +732,17 @@ public class TaskService {
 		taskCommentRepo.save(c);
 	}
 
+	public List<TaskResponse> listForUser(String userId) {
+		return taskRepo.findByAssignedUserIdOrSecondary(userId).stream().map(t -> {
+			try {
+				return toResponseFromDb(t);
+			} catch (Exception e) {
+				log.error("Error mapping task {}: {}", t.getId(), e.getMessage());
+				return baseFields(t);
+			}
+		}).collect(Collectors.toList());
+	}
+
 	private void logUpdate(String taskId, TaskRequest req, List<String> fields) {
 		String fieldsJson = fields.stream().map(f -> "\"" + esc(f) + "\"").collect(Collectors.joining(",", "[", "]"));
 		TaskComment c = buildLog(taskId, currentUserId(), currentUserName(), "update",
