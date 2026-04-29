@@ -12,17 +12,13 @@ public interface TaskRepository extends JpaRepository<Task, String> {
     List<Task> findByAccountId(String accountId);
     List<Task> findByParentType(String parentType);
 
-    /**
-     * Find tasks that:
-     * - have an acceptance SLA set
-     * - have NOT been accepted yet (acceptedAt is null)
-     * - have NOT been alerted yet (acceptanceAlerted is false/null)
-     * - are not already completed or cancelled
-     */
-    @Query("SELECT t FROM Task t WHERE " +
-           "t.acceptanceTimeMins IS NOT NULL AND " +
-           "t.acceptedAt IS NULL AND " +
-           "(t.acceptanceAlerted IS NULL OR t.acceptanceAlerted = false) AND " +
-           "t.status NOT IN ('Completed', 'Canceled')")
-    List<Task> findPendingAcceptanceCheck();
+	/**
+	 * Find tasks that: - have an acceptance SLA set - have NOT been accepted yet
+	 * (acceptedAt is null) - have NOT been alerted yet (acceptanceAlerted is
+	 * false/null) - are not already completed or cancelled
+	 */
+	@Query("SELECT t FROM Task t WHERE " + "t.acceptanceTimeMins IS NOT NULL AND " + "t.acceptedAt IS NULL AND "
+			+ "(t.acceptanceAlerted IS NULL OR t.acceptanceAlerted = false) AND "
+			+ "t.status NOT IN ('Completed', 'Canceled', 'Accepted', 'In Progress')")
+	List<Task> findPendingAcceptanceCheck();
 }
