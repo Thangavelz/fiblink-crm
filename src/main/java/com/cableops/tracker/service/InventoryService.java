@@ -30,7 +30,33 @@ public class InventoryService {
         mapItem(item, req);
         return toItemResponse(itemRepo.save(item));
     }
-
+    @Transactional
+    public InventoryTransactionResponse recordAdjust(AdjustRequest req) {
+        if (req.getNewQuantity() == null || req.getNewQuantity() < 0)
+            throw new RuntimeException("New quantity must be zero or positive");
+        if (req.getNotes() == null || req.getNotes().isBlank())
+            throw new RuntimeException("Adjustment note is required");
+ 
+        InventoryStock stock = stockRepo
+                .findByItemIdAndStoreAreaCode(req.getItemId(), req.getStoreAreaCode())
+                .orElseThrow(() -> new RuntimeException(
+                        "No stock record for item " + req.getItemId()
+                        + " in store " + req.getStoreAreaCode()));
+ 
+        double before = stock.getQuantityOnHand();
+        double after  = req.getNewQuantity();
+        double change = after - before;
+ 
+        stock.setQuantityOnHand(after);
+        stockRepo.save(stock);
+ 
+        String itemName = req.getItemName() != null ? req.getItemName() : req.getItemId();
+ 
+        return saveTransaction("ADJUST", req.getItemId(), itemName,
+                stock.getStoreAreaCode(), stock.getStoreName(),
+                change, after,
+                null, null, req.getNotes());
+    }
     public InventoryItemResponse getItem(String id) {
         return toItemResponse(itemRepo.findById(id)
                 .orElseThrow(() -> new RuntimeException("Item not found: " + id)));

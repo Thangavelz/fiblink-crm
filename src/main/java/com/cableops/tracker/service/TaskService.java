@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
@@ -14,7 +15,6 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.util.*;
@@ -39,10 +39,13 @@ public class TaskService {
 	private final TelegramService telegramService;
 	private final ObjectMapper objectMapper;
 	private final InventoryStockRepository inventoryStockRepo;
-	private final InventoryTransactionRepository inventoryTxnRepo;
+	private final InventoryTransactionRepository inventoryTxnRepo; // ← typo fixed
 
 	private static final String JCV_MEDIUM = "jcv-md";
 	private static final String JCV_SMALL = "jcv-sm";
+
+	@Value("${telegram.admin.group.chatId:}")
+	private String adminGroupChatId;
 
 	// ── ACCEPT ────────────────────────────────────────────────────────────────
 	@Transactional
@@ -59,14 +62,95 @@ public class TaskService {
 		task.setAcceptedAt(LocalDateTime.now());
 		task.setAcceptedById(userId);
 		task.setAcceptedByName(userName);
+		task.setStatus("Accepted");
 		task.setModifiedAt(LocalDateTime.now());
 		taskRepo.save(task);
 
+		try {
+			String data = objectMapper.writeValueAsString(Map.of("from", "Asigned", "to", "Accepted"));
+			TaskComment comment = new TaskComment();
+			comment.setId(UUID.randomUUID().toString());
+			comment.setTaskId(task.getId());
+			comment.setUserId(userId);
+			comment.setUserName(userName);
+			comment.setType("status");
+			comment.setData(data);
+			comment.setCreatedAt(LocalDateTime.now());
+			taskCommentRepo.save(comment);
+		} catch (Exception e) {
+			log.warn("Failed to log accept status change: {}", e.getMessage());
+		}
+
+		// ── Send Telegram notifications ───────────────────────────────────────
+		try {
+			// Full detail → assigned users
+			String acceptUserMsg = buildAcceptMessage(task, userName);
+			notifyUser(task.getAssignedUserId(), acceptUserMsg);
+			notifyAdminGroup(acceptUserMsg); // ← ADD
+
+			if (!isBlank(task.getCSecondaryUserIds())) {
+				for (String sid : task.getCSecondaryUserIds().split(",")) {
+					if (!isBlank(sid))
+						notifyUser(sid.trim(), acceptUserMsg);
+				}
+			} else if (task.getCSecondaryAssignedUserId() != null) {
+				notifyUser(task.getCSecondaryAssignedUserId(), acceptUserMsg);
+			}
+
+			// Compact status → account group chat only
+			String acceptGroupMsg = buildGroupStatusMessage("📌 Task Update", task.getCSRNumber(), task.getParentName(),
+					"Accepted", null);
+			notifyAccountGroup(task.getAccountId(), acceptGroupMsg);
+
+		} catch (Exception e) {
+			log.error("Accept Telegram failed task {}: {}", id, e.getMessage(), e);
+		}
 		return toResponseFromDb(task);
 	}
 
-	// ── CREATE ────────────────────────────────────────────────────────────────
+	private void notifyAdminGroup(String message) {
+		userRepo.findByType("ADMIN").forEach(admin -> {
+			String chatId = admin.getTelegramUsername();
+			if (chatId != null && !chatId.isBlank()) {
+				log.info("Notifying admin userId={} chatId={}", admin.getId(), chatId);
+				telegramService.sendMessage(chatId, message);
+			}
+		});
+	}
 
+	private String buildGroupStatusMessage(String header, String srNumber, String circuitName, String status,
+			String extraLine) {
+		StringBuilder sb = new StringBuilder();
+		sb.append("<b>").append(header).append("</b>\n\n");
+		sb.append("<b>SR Number:</b> ").append(coalesce(srNumber, "—")).append("\n");
+		sb.append("<b>Circuit Name:</b> ").append(coalesce(circuitName, "—")).append("\n");
+		sb.append("<b>Status:</b> ").append(coalesce(status, "—")).append("\n");
+		if (!isBlank(extraLine))
+			sb.append(extraLine).append("\n");
+		return sb.toString();
+	}
+
+	private String buildAcceptMessage(Task task, String acceptedByName) {
+		StringBuilder sb = new StringBuilder();
+		sb.append("<b>✅ Task Accepted</b>\n\n");
+		sb.append("<b>Circuit Name:</b> ").append(coalesce(task.getParentName(), "—")).append("\n");
+		sb.append("<b>Account:</b> ").append(coalesce(task.getAccountName(), "—")).append("\n");
+		sb.append("<b>SR Number:</b> ").append(coalesce(task.getCSRNumber(), "—")).append("\n");
+		sb.append("<b>Work Type:</b> ").append(coalesce(task.getCWorkType(), "—")).append("\n");
+		sb.append("<b>Priority:</b> ").append(coalesce(task.getPriority(), "Normal")).append("\n");
+		if (!isBlank(task.getAssignedUserName()))
+			sb.append("<b>Assigned To:</b> ").append(task.getAssignedUserName()).append("\n");
+		sb.append("<b>Accepted By:</b> ").append(coalesce(acceptedByName, "—")).append("\n");
+		sb.append("\n<i>Status: Assigned → Accepted</i>");
+		return sb.toString();
+	}
+
+	public Task getTaskEntity(String id) {
+		return taskRepo.findById(id)
+				.orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found: " + id));
+	}
+
+	// ── CREATE ────────────────────────────────────────────────────────────────
 	@Transactional
 	public TaskResponse create(TaskRequest req) {
 		Task t = new Task();
@@ -76,7 +160,10 @@ public class TaskService {
 		t.setModifiedAt(LocalDateTime.now());
 		map(t, req);
 
-		// ── Resolve account from parent ───────────────────────────────────────────
+		// dateStart = creation timestamp always (not user input)
+		t.setDateStart(t.getCreatedAt());
+		t.setDateStartDate(t.getCreatedAt().toLocalDate());
+
 		resolveAccount(t, req.getParentId(), req.getParentType(), req.getDescription());
 
 		taskRepo.save(t);
@@ -85,9 +172,12 @@ public class TaskService {
 		linkAttachmentsToTask(t.getId(), req.getAttachmentsIds());
 		logCreate(t.getId(), req);
 
-		String msg = buildCreateMessage(t, req);
-		notifyAllUsers(req.getAssignedUserId(), req.getCSecondaryAssignedUserIds(), msg);
-		notifyAccountGroup(t.getAccountId(), msg);
+		String userMsg = buildCreateMessage(t, req);
+		String groupMsg = buildGroupStatusMessage("📌 New Task", t.getCSRNumber(), t.getParentName(), t.getStatus(),
+				null);
+		notifyAllUsers(req.getAssignedUserId(), req.getCSecondaryAssignedUserIds(), userMsg);
+		notifyAccountGroup(t.getAccountId(), groupMsg);
+		notifyAdminGroup(userMsg); // ← ADD
 
 		return toResponseFromDb(t);
 	}
@@ -132,8 +222,45 @@ public class TaskService {
 		if (isCompleting)
 			validateMaterialOnComplete(old, req);
 
+		// Auto-set dateCompleted before detectChanges so it flows through map() and
+		// audit log
+		if (isCompleting && req.getDateCompleted() == null) {
+			req.setDateCompleted(LocalDateTime.now());
+		}
+
+		// Clear dateCompleted + duration if re-opening a completed task
+		if (wasCompleted && req.getStatus() != null && !"Completed".equals(req.getStatus())) {
+			req.setDateCompleted(null);
+			old.setDateCompleted(null);
+			old.setCDurationText(null);
+		}
+
 		Map<String, Boolean> changed = detectChanges(old, req);
 		map(old, req);
+
+		// Auto-calculate duration = dateCompleted − acceptedAt (fallback to dateStart)
+		if (isCompleting) {
+			LocalDateTime completedAt = old.getDateCompleted();
+			LocalDateTime acceptedAt = old.getAcceptedAt();
+			LocalDateTime from = (acceptedAt != null) ? acceptedAt : old.getDateStart();
+			if (completedAt != null && from != null) {
+				long diffMins = java.time.Duration.between(from, completedAt).toMinutes();
+				if (diffMins >= 0) {
+					long days = diffMins / 1440;
+					long hours = (diffMins % 1440) / 60;
+					long mins = diffMins % 60;
+					StringBuilder dur = new StringBuilder();
+					if (days > 0)
+						dur.append(days).append("d ");
+					if (hours > 0)
+						dur.append(hours).append("h ");
+					if (mins > 0)
+						dur.append(mins).append("m");
+					old.setCDurationText(dur.toString().trim().isEmpty() ? "0m" : dur.toString().trim());
+				}
+			}
+		}
+
 		resolveAccount(old, req.getParentId() != null ? req.getParentId() : old.getParentId(),
 				req.getParentType() != null ? req.getParentType() : old.getParentType(),
 				req.getDescription() != null ? req.getDescription() : old.getDescription());
@@ -153,7 +280,6 @@ public class TaskService {
 			reconcileAttachments(id, req.getAttachmentsIds());
 		}
 
-		// Activity log
 		String requestedStatus = req.getStatus();
 		boolean statusActuallyChanged = requestedStatus != null && !requestedStatus.equals(oldStatus);
 
@@ -168,17 +294,25 @@ public class TaskService {
 			addSystemComment(old, "update", changed, currentUserId(), currentUserName());
 		}
 
-		// Inventory auto-deduction
 		if (isCompleting)
 			deductInventoryOnComplete(old, id);
 
-		// Telegram
 		if (statusActuallyChanged || !changedFieldNames.isEmpty()) {
 			List<String> secondaryIds = resolveSecondaryIds(old, req);
 			String statusForMsg = statusActuallyChanged ? requestedStatus : null;
-			String msg = buildUpdateMessage(old, req, statusForMsg, changedFieldNames);
-			notifyAllUsers(old.getAssignedUserId(), secondaryIds, msg);
-			notifyAccountGroup(old.getAccountId(), msg);
+
+			// Full detail message → assigned users only
+			String userMsg2 = buildUpdateMessage(old, req, statusForMsg, changedFieldNames);
+			notifyAllUsers(old.getAssignedUserId(), secondaryIds, userMsg2);
+			notifyAdminGroup(userMsg2); // ← ADD
+
+			// Compact status-only message → account group chat
+			if (statusActuallyChanged) {
+				String groupMsg2 = buildGroupStatusMessage("📌 Task Update", old.getCSRNumber(), old.getParentName(),
+						requestedStatus, null);
+				notifyAccountGroup(old.getAccountId(), groupMsg2);
+			}
+			// If only field changes (no status change), don't notify account group at all
 		}
 
 		return toResponseFromDb(old);
@@ -194,7 +328,6 @@ public class TaskService {
 		taskEbbMllRepo.deleteByTaskId(id);
 		taskCommentRepo.findByTaskIdOrderByCreatedAtAsc(id).forEach(c -> taskCommentRepo.deleteById(c.getId()));
 
-		// Delete attachment files + rows
 		List<Attachment> linked = attachmentRepo.findByRelatedIdAndRelatedType(id, "Task");
 		for (Attachment a : linked) {
 			deleteAttachmentFile(a);
@@ -300,6 +433,7 @@ public class TaskService {
 
 	private void deductStock(String itemId, String itemName, String storeAreaCode, double qty, String taskId,
 			String taskName, String performedById, String performedByName) {
+
 		InventoryStock stock = inventoryStockRepo.findByItemIdAndStoreAreaCode(itemId, storeAreaCode).orElseGet(() -> {
 			log.warn("No stock record for item {} in store {} — creating at 0", itemName, storeAreaCode);
 			InventoryStock s = new InventoryStock();
@@ -413,20 +547,17 @@ public class TaskService {
 
 	private String buildUpdateMessage(Task t, TaskRequest req, String newStatus, List<String> changedFields) {
 		String header = (newStatus != null && !newStatus.isBlank()) ? "📌 Task Status Updated" : "📌 Task Updated";
-
 		StringBuilder footer = new StringBuilder();
 		if (newStatus != null && !newStatus.isBlank())
 			footer.append("\n<b>🔔 Status changed to:</b> ").append(newStatus);
 		if (changedFields != null && !changedFields.isEmpty())
 			footer.append("\n<b>Updated Fields:</b> ").append(String.join(", ", changedFields));
-
 		return buildStandardMessage(header, t, req, footer.length() > 0 ? footer.toString() : null);
 	}
 
 	private String buildStandardMessage(String header, Task t, TaskRequest req, String footer) {
 		StringBuilder sb = new StringBuilder();
 		sb.append("<b>").append(header).append("</b>\n\n");
-
 		String circuitName = coalesce(req != null ? req.getParentName() : null, t.getParentName());
 		sb.append("<b>Circuit Name:</b> ").append(coalesce(circuitName, "—")).append("\n");
 		sb.append("<b>Account:</b> ").append(coalesce(t.getAccountName(), "—")).append("\n");
@@ -434,38 +565,30 @@ public class TaskService {
 		sb.append("<b>Status:</b> ").append(coalesce(t.getStatus(), "New")).append("\n");
 		sb.append("<b>Priority:</b> ").append(coalesce(t.getPriority(), "Normal")).append("\n");
 		sb.append("<b>Work Type:</b> ").append(coalesce(t.getCWorkType(), "—")).append("\n");
-
 		String circuitId = extractCircuitId(
 				req != null && req.getDescription() != null ? req.getDescription() : t.getDescription());
 		if (circuitId != null && !circuitId.isBlank())
 			sb.append("<b>Circuit ID:</b> ").append(circuitId).append("\n");
-
 		String assignedName = coalesce(req != null ? req.getAssignedUserName() : null, t.getAssignedUserName());
 		if (!isBlank(assignedName))
 			sb.append("<b>Assigned User:</b> ").append(assignedName).append("\n");
-
 		String secondaryNames = resolveSecondaryNamesString(t, req);
 		if (!isBlank(secondaryNames))
 			sb.append("<b>Secondary Assigned User:</b> ").append(secondaryNames).append("\n");
-
 		String note = req != null && req.getCNote() != null ? req.getCNote() : t.getCNote();
 		if (!isBlank(note))
 			sb.append("<b>Note:</b> ").append(note).append("\n");
-
 		String description = req != null && req.getDescription() != null ? req.getDescription() : t.getDescription();
 		if (!isBlank(description)) {
 			sb.append("<b>Description:</b> ").append(description);
 			if (!description.endsWith("\n"))
 				sb.append("\n");
 		}
-
 		String materialBlock = buildMaterialUsedBlock(t, req);
 		if (!isBlank(materialBlock))
 			sb.append("\n").append(materialBlock);
-
 		if (!isBlank(footer))
 			sb.append(footer);
-
 		return sb.toString();
 	}
 
@@ -477,15 +600,12 @@ public class TaskService {
 		Integer mediumBox = pickInt(req != null ? req.getMediumJcBoxUsed() : null, t.getMediumJcBoxUsed());
 		Integer smallBox = pickInt(req != null ? req.getSmallJcBoxUsed() : null, t.getSmallJcBoxUsed());
 		Integer patchCable = pickInt(req != null ? req.getPatchCableUsed() : null, t.getPatchCableUsed());
-
 		boolean any = !isBlank(ofcType) || ofcStart != null || ofcEnd != null || fiberUsed != null || mediumBox != null
 				|| smallBox != null || patchCable != null;
 		if (!any)
 			return null;
-
 		if (fiberUsed == null && ofcStart != null && ofcEnd != null)
 			fiberUsed = Math.abs(ofcEnd - ofcStart);
-
 		StringBuilder b = new StringBuilder();
 		b.append("<b>📦 Material Used</b>\n");
 		if (!isBlank(ofcType))
@@ -567,7 +687,6 @@ public class TaskService {
 		m.put("Description", changed(old.getDescription(), req.getDescription()));
 		m.put("Note", changed(old.getCNote(), req.getCNote()));
 		m.put("Assigned User", changed(old.getAssignedUserId(), req.getAssignedUserId()));
-		m.put("Date Start", changed(old.getDateStart(), req.getDateStart()));
 		m.put("Date Completed", changed(old.getDateCompleted(), req.getDateCompleted()));
 		return m;
 	}
@@ -582,14 +701,12 @@ public class TaskService {
 		String workType = req.getCWorkType() != null ? req.getCWorkType() : current.getCWorkType();
 		if ("Survey".equalsIgnoreCase(workType))
 			return;
-
 		String ofcType = req.getOfcType() != null ? req.getOfcType() : current.getOfcType();
 		Double ofcStart = req.getOfcStartingMtr() != null ? req.getOfcStartingMtr() : current.getOfcStartingMtr();
 		Double ofcEnd = req.getOfcEndingMtr() != null ? req.getOfcEndingMtr() : current.getOfcEndingMtr();
 		Integer mediumBox = req.getMediumJcBoxUsed() != null ? req.getMediumJcBoxUsed() : current.getMediumJcBoxUsed();
 		Integer smallBox = req.getSmallJcBoxUsed() != null ? req.getSmallJcBoxUsed() : current.getSmallJcBoxUsed();
 		Integer patchCable = req.getPatchCableUsed() != null ? req.getPatchCableUsed() : current.getPatchCableUsed();
-
 		StringBuilder missing = new StringBuilder();
 		if (isBlank(ofcType))
 			missing.append("OFC Type, ");
@@ -603,7 +720,6 @@ public class TaskService {
 			missing.append("Small JC Box Used, ");
 		if (patchCable == null)
 			missing.append("Patch Cable Used, ");
-
 		if (missing.length() > 0)
 			throw new RuntimeException("Cannot complete task: Material Used fields are required — "
 					+ missing.substring(0, missing.length() - 2));
@@ -632,14 +748,10 @@ public class TaskService {
 			t.setParentType(r.getParentType());
 		if (r.getParentName() != null)
 			t.setParentName(r.getParentName());
-		if (r.getDateStart() != null)
-			t.setDateStart(r.getDateStart());
-		if (r.getDateStartDate() != null)
-			t.setDateStartDate(r.getDateStartDate());
+		// dateStart NOT mapped — immutable, set once at creation
+		// cDurationText NOT mapped — computed by backend on completion
 		if (r.getDateCompleted() != null)
 			t.setDateCompleted(r.getDateCompleted());
-		if (r.getCDurationText() != null)
-			t.setCDurationText(r.getCDurationText());
 		if (r.getDescription() != null)
 			t.setDescription(r.getDescription());
 		if (r.getCNote() != null)
@@ -680,13 +792,9 @@ public class TaskService {
 		}
 	}
 
-	/**
-	 * Resolve account from parent — OHF circuit or EBB/MLL based on parentType.
-	 */
 	private void resolveAccount(Task t, String parentId, String parentType, String description) {
 		if (parentId == null || parentId.isBlank())
 			return;
-
 		if ("EBBMLLs".equals(parentType)) {
 			ebbMllRepo.findById(parentId).ifPresent(e -> {
 				if (e.getAccountId() != null) {
@@ -695,7 +803,6 @@ public class TaskService {
 				}
 			});
 		} else {
-			// COHFCircuits or legacy null parentType
 			circuitRepo.findById(parentId).ifPresent(c -> {
 				if (c.getAccountId() != null) {
 					t.setAccountId(c.getAccountId());
@@ -708,10 +815,7 @@ public class TaskService {
 	private void logCreate(String taskId, TaskRequest req) {
 		String actorId = currentUserId();
 		String actorName = currentUserName();
-
-		// Fall back to assigned user name for the message text (existing behaviour)
 		String assignedName = req.getAssignedUserName() != null ? req.getAssignedUserName() : "Unassigned";
-
 		TaskComment c = new TaskComment();
 		c.setId(UUID.randomUUID().toString());
 		c.setTaskId(taskId);
@@ -723,8 +827,6 @@ public class TaskService {
 		c.setCreatedAt(LocalDateTime.now());
 		taskCommentRepo.save(c);
 	}
-
-// ── Also fix logStatus and logUpdate similarly ────────────────────────────────
 
 	private void logStatus(String taskId, TaskRequest req, String newStatus) {
 		TaskComment c = buildLog(taskId, currentUserId(), currentUserName(), "status",
@@ -799,8 +901,6 @@ public class TaskService {
 
 	private TaskResponse toResponseFromDb(Task t) {
 		TaskResponse res = baseFields(t);
-
-		// OHF Circuits
 		List<TaskCircuit> circuits = taskCircuitRepo.findByTaskId(t.getId());
 		res.setCOHFCircuitsesIds(circuits.stream().map(TaskCircuit::getCircuitId).filter(Objects::nonNull).distinct()
 				.collect(Collectors.toList()));
@@ -814,8 +914,6 @@ public class TaskService {
 			circuitNames.putIfAbsent(c.getCircuitId(), name);
 		}
 		res.setCOHFCircuitsesNames(circuitNames);
-
-		// EBB/MLL
 		List<TaskEbbMll> ebbMlls = taskEbbMllRepo.findByTaskId(t.getId());
 		res.setCEBBMLLsIds(ebbMlls.stream().map(TaskEbbMll::getEbbMllId).filter(Objects::nonNull).distinct()
 				.collect(Collectors.toList()));
@@ -829,8 +927,6 @@ public class TaskService {
 			ebbNames.putIfAbsent(e.getEbbMllId(), name);
 		}
 		res.setCEBBMLLsNames(ebbNames);
-
-		// Attachments
 		List<Attachment> atts = attachmentRepo.findByRelatedIdAndRelatedType(t.getId(), "Task");
 		res.setAttachmentsIds(
 				atts.stream().map(Attachment::getId).filter(Objects::nonNull).collect(Collectors.toList()));
@@ -846,11 +942,8 @@ public class TaskService {
 		}
 		res.setAttachmentsNames(attNames);
 		res.setAttachmentsTypes(attTypes);
-
-		// Stream
 		res.setStream(taskCommentRepo.findByTaskIdOrderByCreatedAtAsc(t.getId()).stream().map(this::toCommentDto)
 				.collect(Collectors.toList()));
-
 		return res;
 	}
 
@@ -893,8 +986,6 @@ public class TaskService {
 		res.setAcceptedAt(t.getAcceptedAt());
 		res.setAcceptedById(t.getAcceptedById());
 		res.setAcceptedByName(t.getAcceptedByName());
-
-		// Secondary users
 		if (!isBlank(t.getCSecondaryUserIds())) {
 			List<String> ids = Arrays.asList(t.getCSecondaryUserIds().split(","));
 			res.setCSecondaryAssignedUserIds(ids);
@@ -915,7 +1006,6 @@ public class TaskService {
 			res.setCSecondaryAssignedUserIds(List.of());
 			res.setCSecondaryAssignedUserNames(Map.of());
 		}
-
 		res.setCOHFCircuitsesIds(List.of());
 		res.setCOHFCircuitsesNames(Map.of());
 		res.setCEBBMLLsIds(List.of());

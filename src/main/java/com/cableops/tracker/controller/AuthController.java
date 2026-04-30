@@ -60,7 +60,7 @@ public class AuthController {
         response.addHeader(HttpHeaders.SET_COOKIE, cookie.toString());
 
         return ResponseEntity.ok(new LoginResponse(
-                user.getId(), user.getUserName(), user.getName(), user.getType()
+                user.getId(), user.getUserName(), user.getName(), user.getType(), user.getAvatarId()
         ));
     }
 
@@ -119,11 +119,9 @@ public class AuthController {
 
         // Return fresh data from DB (name or role may have changed)
         return ResponseEntity.ok(new LoginResponse(
-                user.getId(),
-                user.getUserName(),
-                user.getName(),    // fresh from DB
-                user.getType()     // fresh from DB
+                user.getId(), user.getUserName(), user.getName(), user.getType(), user.getAvatarId()
         ));
+         
     }
 
     private String extractCookieToken(jakarta.servlet.http.HttpServletRequest request) {

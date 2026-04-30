@@ -4,6 +4,7 @@ import com.cableops.tracker.dto.TaskCommentDto;
 import com.cableops.tracker.dto.TaskCommentRequest;
 import com.cableops.tracker.dto.TaskRequest;
 import com.cableops.tracker.dto.TaskResponse;
+import com.cableops.tracker.entity.Task;
 import com.cableops.tracker.service.TaskService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -54,11 +55,9 @@ public class TaskController {
             Authentication auth,
             HttpServletResponse response) {
 
-        // Field Engineer: automatically scope to tasks where they are
-        // primary OR secondary assigned user — ignore any client-passed filter.
         List<TaskResponse> all;
         if (hasRole(auth, "ROLE_FIELD_ENGINEER")) {
-            String userId = auth.getName(); // JwtAuthFilter sets principal = userId
+            String userId = auth.getName();
             all = service.listForUser(userId);
         } else {
             all = service.list(status, assignedUserId, accountId);
@@ -80,6 +79,17 @@ public class TaskController {
     public TaskResponse update(@PathVariable("id") String id,
                                @RequestBody TaskRequest req,
                                Authentication auth) {
+
+        // ✅ FIX: use service method — taskRepo is not injected in the controller
+        Task current = service.getTaskEntity(id);
+
+        // ── COMPLETED LOCK — only Admin may edit a completed task ─────────────
+        if ("Completed".equalsIgnoreCase(current.getStatus()) && !hasRole(auth, "ROLE_ADMIN")) {
+            throw new ResponseStatusException(
+                HttpStatus.FORBIDDEN,
+                "This task is Completed and cannot be modified. Contact an Admin."
+            );
+        }
 
         if (hasRole(auth, "ROLE_FIELD_ENGINEER")) {
             // Field Engineer: may only update status and field-level notes.
