@@ -109,6 +109,11 @@ public class TaskController {
             stripped.setAttachmentsIds(req.getAttachmentsIds());
             stripped.setAttachmentsNames(req.getAttachmentsNames());
             stripped.setAttachmentsTypes(req.getAttachmentsTypes());
+         // In TaskController.java update() method, add to the stripped request:
+            stripped.setDescription(req.getDescription());   // ← ADD
+            stripped.setCNote(req.getCNote());                // already there ✓
+            stripped.setCFieldNotes(req.getCFieldNotes());    // already there ✓
+            stripped.setCResolutionNotes(req.getCResolutionNotes()); // already there ✓
             return service.update(id, stripped);
         }
 

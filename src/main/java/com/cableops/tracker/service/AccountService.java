@@ -64,6 +64,7 @@ public class AccountService {
         a.setPhoneNumber(r.getPhoneNumber());
         a.setType(r.getType());
         a.setIndustry(r.getIndustry());
+        a.setWebsite(r.getWebsite());              // ← ADD THIS
 
         a.setBillingAddressStreet(r.getBillingAddressStreet());
         a.setBillingAddressCity(r.getBillingAddressCity());
