@@ -160,6 +160,11 @@ public class TaskService {
 		t.setModifiedAt(LocalDateTime.now());
 		map(t, req);
 
+		// Auto-set status to "Asigned" when a user is assigned at creation
+		if (t.getAssignedUserId() != null && !t.getAssignedUserId().isBlank() && "New".equals(t.getStatus())) {
+			t.setStatus("Asigned");
+		}
+
 		// dateStart = creation timestamp always (not user input)
 		t.setDateStart(t.getCreatedAt());
 		t.setDateStartDate(t.getCreatedAt().toLocalDate());
@@ -286,6 +291,14 @@ public class TaskService {
 		if (statusActuallyChanged) {
 			addSystemComment(old, "status", Map.of("from", oldStatus != null ? oldStatus : "", "to", requestedStatus),
 					currentUserId(), currentUserName());
+
+			// ── Record pending reason as its own stream entry ─────────────────
+			if ("Pending".equals(requestedStatus) && req.getPendingReason() != null
+					&& !req.getPendingReason().isBlank()) {
+				TaskComment pendingLog = buildLog(old.getId(), currentUserId(), currentUserName(), "pending",
+						"{\"reason\":\"" + esc(req.getPendingReason()) + "\"}");
+				taskCommentRepo.save(pendingLog);
+			}
 		}
 
 		List<String> changedFieldNames = changed.entrySet().stream().filter(Map.Entry::getValue).map(Map.Entry::getKey)

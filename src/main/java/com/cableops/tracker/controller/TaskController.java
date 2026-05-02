@@ -24,6 +24,12 @@ public class TaskController {
 
     private final TaskService service;
 
+    // ── Status progression order for Field Engineers ──────────────────────────
+    private static final List<String> STATUS_ORDER =
+        List.of("New", "Asigned", "Accepted", "In Progress", "Completed");
+    // Note: "Pending" is a sideways state — allowed from any active status but
+    // not part of the linear order.
+
     // ── CREATE — Admin / Manager only ────────────────────────────────────────
     @PostMapping
     public TaskResponse create(@RequestBody TaskRequest req, Authentication auth) {
@@ -92,12 +98,50 @@ public class TaskController {
         }
 
         if (hasRole(auth, "ROLE_FIELD_ENGINEER")) {
-            // Field Engineer: may only update status and field-level notes.
+
+            // ── Forward-only status enforcement ──────────────────────────────
+            String currentStatus = current.getStatus();
+            String newStatus     = req.getStatus();
+
+            if (newStatus != null && !newStatus.equals(currentStatus)) {
+                boolean movingToPending   = "Pending".equals(newStatus);
+                boolean movingFromPending = "Pending".equals(currentStatus);
+
+                int currentIdx = STATUS_ORDER.indexOf(currentStatus);
+                int newIdx     = STATUS_ORDER.indexOf(newStatus);
+
+                // From Pending: only allow resuming forward (next in order after where it paused)
+                // We don't know the pre-Pending status, so allow any forward move from Pending
+                boolean isBackward = !movingToPending
+                    && !movingFromPending
+                    && currentIdx >= 0
+                    && newIdx >= 0
+                    && newIdx < currentIdx;
+
+                if (isBackward) {
+                    throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                        "You cannot move a task backward. Status must progress forward: "
+                        + "New → Asigned → Accepted → In Progress → Completed.");
+                }
+
+                // Pending requires a non-blank reason
+                if (movingToPending) {
+                    String reason = req.getPendingReason();
+                    if (reason == null || reason.isBlank()) {
+                        throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            "A reason is required when setting the status to Pending.");
+                    }
+                }
+            }
+
+            // ── Strip to allowed fields ───────────────────────────────────────
             TaskRequest stripped = new TaskRequest();
             stripped.setStatus(req.getStatus());
+            stripped.setPendingReason(req.getPendingReason());
             stripped.setCNote(req.getCNote());
             stripped.setCFieldNotes(req.getCFieldNotes());
             stripped.setCResolutionNotes(req.getCResolutionNotes());
+            stripped.setDescription(req.getDescription());
             stripped.setOfcType(req.getOfcType());
             stripped.setOfcStartingMtr(req.getOfcStartingMtr());
             stripped.setOfcEndingMtr(req.getOfcEndingMtr());
