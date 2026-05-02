@@ -66,7 +66,8 @@ public class Account {
 
     @Column(name = "created_at")
     private LocalDateTime createdAt;
-
+    @Column(name = "website")
+    private String website;
     @Column(name = "modified_at")
     private LocalDateTime modifiedAt;
 }

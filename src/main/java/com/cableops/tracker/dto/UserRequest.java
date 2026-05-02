@@ -1,56 +1,65 @@
 package com.cableops.tracker.dto;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
-
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 
 @Data
 public class UserRequest {
-
     private String userName;
     private String password;
     private String passwordConfirm;
-
     private String salutationName;
     private String firstName;
     private String lastName;
     private String name;
-
-    /**
-     * Allowed values: "ADMIN", "Manager", "Field Engineer"
-     * Validated in UserService before saving.
-     */
     private String type;
     private Boolean isActive;
-
     private String title;
     private String gender;
 
+    @JsonProperty("cTelegramUsername")
     private String cTelegramUsername;
+
+    @JsonProperty("cFathername")
     private String cFathername;
+
+    @JsonProperty("cAadharNumber")
     private String cAadharNumber;
+
+    @JsonProperty("cEmergencyContactNumber")
     private String cEmergencyContactNumber;
+
+    @JsonProperty("cDateofjoining")
     private LocalDate cDateofjoining;
 
-    // Avatar — upload via /api/v1/Attachment first, then pass the returned id here
     private String avatarId;
     private String avatarName;
 
-    // Teams (pre-loaded list in UI, area-based)
     private List<String> teamsIds;
     private Map<String, String> teamsNames;
-
-    // Roles — mirrors "type"; kept separate so a user can have multiple roles later
     private List<String> rolesIds;
     private Map<String, String> rolesNames;
 
-    // Proof documents — upload via /api/v1/Attachment, pass ids here
+    @JsonProperty("cProofDocumentsIds")
     private List<String> cProofDocumentsIds;
+
+    @JsonProperty("cProofDocumentsNames")
     private Map<String, String> cProofDocumentsNames;
+
+    @JsonProperty("cProofDocumentsTypes")
     private Map<String, String> cProofDocumentsTypes;
 
-    // UI-only flag; ignored by backend (no email/SMS infra yet)
     private Boolean sendAccessInfo;
+    public String getCTelegramUsername() { return cTelegramUsername; }
+    public String getCFathername() { return cFathername; }
+    public String getCAadharNumber() { return cAadharNumber; }
+    public String getCEmergencyContactNumber() { return cEmergencyContactNumber; }
+    public LocalDate getCDateofjoining() { return cDateofjoining; }
+    public List<String> getCProofDocumentsIds() { return cProofDocumentsIds; }
+    public Map<String, String> getCProofDocumentsNames() { return cProofDocumentsNames; }
+    public Map<String, String> getCProofDocumentsTypes() { return cProofDocumentsTypes; }
+    
 }

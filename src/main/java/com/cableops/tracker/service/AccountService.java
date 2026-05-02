@@ -103,6 +103,7 @@ public class AccountService {
                 a.getShippingAddressPostalCode(),
 
                 a.getDescription(),
+                a.getWebsite(), 
                 a.getCTelegramgroupchatid(),
 
                 a.getCreatedAt(),

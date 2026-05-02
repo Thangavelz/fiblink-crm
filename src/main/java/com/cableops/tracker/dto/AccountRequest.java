@@ -1,6 +1,6 @@
 package com.cableops.tracker.dto;
 
-
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.constraints.NotBlank;
 import lombok.Getter;
 import lombok.Setter;
@@ -30,6 +30,8 @@ public class AccountRequest {
     private String shippingAddressPostalCode;
 
     private String description;
+    private String website;
 
+    @JsonProperty("cTelegramgroupchatid")
     private String cTelegramgroupchatid;
 }

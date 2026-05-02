@@ -2,6 +2,7 @@ package com.cableops.tracker.dto;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -11,80 +12,91 @@ import java.util.Map;
 @Data
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class TaskResponse {
+    private String id;
+    private String name;
+    private String status;
+    private String priority;
 
-	private String id;
-	private String name;
-	private String status;
-	private String priority;
-	private String cWorkType;
-	private String cRFO;
-	private String cSRNumber;
+    @JsonProperty("cWorkType")
+    private String cWorkType;
+    @JsonProperty("cRFO")
+    private String cRFO;
+    @JsonProperty("cSRNumber")
+    private String cSRNumber;
 
-	private String parentId;
-	private String parentType;
-	private String parentName;
+    private String parentId;
+    private String parentType;
+    private String parentName;
 
-	private List<String> cOHFCircuitsesIds;
-	private Map<String, String> cOHFCircuitsesNames;
+    @JsonProperty("cOHFCircuitsesIds")
+    private List<String> cOHFCircuitsesIds;
+    @JsonProperty("cOHFCircuitsesNames")
+    private Map<String, String> cOHFCircuitsesNames;
 
-	@JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
-	private LocalDateTime dateStart;
-	private LocalDate dateStartDate;
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    private LocalDateTime dateStart;
+    private LocalDate dateStartDate;
 
-	@JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
-	private LocalDateTime dateCompleted;
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    private LocalDateTime dateCompleted;
 
-	private String cDurationText;
-	private String description;
-	private String cNote;
+    @JsonProperty("cDurationText")
+    private String cDurationText;
+    private String description;
 
-	private String assignedUserId;
-	private String assignedUserName;
+    @JsonProperty("cNote")
+    private String cNote;
 
-	private List<String> cSecondaryAssignedUserIds;
-	private Map<String, String> cSecondaryAssignedUserNames;
+    private String assignedUserId;
+    private String assignedUserName;
 
-	private String accountId;
-	private String accountName;
+    @JsonProperty("cSecondaryAssignedUserIds")
+    private List<String> cSecondaryAssignedUserIds;
+    @JsonProperty("cSecondaryAssignedUserNames")
+    private Map<String, String> cSecondaryAssignedUserNames;
 
-	private List<String> teamsIds;
-	private Map<String, String> teamsNames;
+    private String accountId;
+    private String accountName;
 
-	private List<String> attachmentsIds;
-	private Map<String, String> attachmentsNames;
-	private Map<String, String> attachmentsTypes;
+    private List<String> teamsIds;
+    private Map<String, String> teamsNames;
 
-	private String ofcType;
-	private Double ofcStartingMtr;
-	private Double ofcEndingMtr;
-	private Double fiberUsedMtr;
-	private Integer mediumJcBoxUsed;
-	private Integer smallJcBoxUsed;
-	private Integer patchCableUsed;
+    private List<String> attachmentsIds;
+    private Map<String, String> attachmentsNames;
+    private Map<String, String> attachmentsTypes;
 
-	private List<TaskCommentDto> stream;
+    private String ofcType;
+    private Double ofcStartingMtr;
+    private Double ofcEndingMtr;
+    private Double fiberUsedMtr;
+    private Integer mediumJcBoxUsed;
+    private Integer smallJcBoxUsed;
+    private Integer patchCableUsed;
 
-	@JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
-	private LocalDateTime createdAt;
+    private List<TaskCommentDto> stream;
 
-	@JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
-	private LocalDateTime modifiedAt;
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    private LocalDateTime createdAt;
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    private LocalDateTime modifiedAt;
 
-	private String createdById;
-	private String createdByName;
+    private String createdById;
+    private String createdByName;
+    private Integer acceptanceTimeMins;
 
-	private Integer acceptanceTimeMins;
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    private LocalDateTime acceptedAt;
 
-	@JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
-	private LocalDateTime acceptedAt;
+    private String acceptedById;
+    private String acceptedByName;
 
-	private String acceptedById;
-	private String acceptedByName;
+    @JsonProperty("cEBBMLLsIds")
+    private List<String> cEBBMLLsIds;
+    @JsonProperty("cEBBMLLsNames")
+    private Map<String, String> cEBBMLLsNames;
 
-	private List<String> cEBBMLLsIds;
-	private Map<String, String> cEBBMLLsNames;
-
-	private String cFieldNotes;
-	private String cResolutionNotes;
-
+    @JsonProperty("cFieldNotes")
+    private String cFieldNotes;
+    @JsonProperty("cResolutionNotes")
+    private String cResolutionNotes;
 }
