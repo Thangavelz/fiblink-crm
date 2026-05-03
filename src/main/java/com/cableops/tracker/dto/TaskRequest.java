@@ -78,4 +78,7 @@ public class TaskRequest {
     private String cFieldNotes;
     @JsonProperty("cResolutionNotes")
     private String cResolutionNotes;
+
+    // ── Required when a Field Engineer sets status to "Pending" ──────────────
+    private String pendingReason;
 }

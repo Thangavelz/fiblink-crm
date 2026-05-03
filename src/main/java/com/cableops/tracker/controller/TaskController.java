@@ -86,7 +86,6 @@ public class TaskController {
                                @RequestBody TaskRequest req,
                                Authentication auth) {
 
-        // ✅ FIX: use service method — taskRepo is not injected in the controller
         Task current = service.getTaskEntity(id);
 
         // ── COMPLETED LOCK — only Admin may edit a completed task ─────────────
@@ -162,7 +161,6 @@ public class TaskController {
         }
 
         if (hasRole(auth, "ROLE_MANAGER")) {
-            // Manager: full update including reassign
             return service.update(id, req);
         }
 
