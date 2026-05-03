@@ -79,4 +79,6 @@ public class OhfCircuitRequest {
     private String     arcasperRatecardperKmCurrency;
     private BigDecimal amountPerKmPerMonth;
     private List<String> multiEnum;
+    private LocalDate suspendedDate;
+    private String suspendedReason;
 }

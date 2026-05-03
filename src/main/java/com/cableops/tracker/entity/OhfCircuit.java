@@ -176,4 +176,10 @@ public class OhfCircuit {
 
     @Column(name = "modified_at")
     private LocalDateTime modifiedAt;
+    
+    @Column(name = "suspended_date")
+    private LocalDate suspendedDate;
+
+    @Column(name = "suspended_reason", length = 1000)
+    private String suspendedReason;
 }

@@ -90,4 +90,7 @@ public class OhfCircuitResponse {
 
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private LocalDateTime modifiedAt;
+    
+    private LocalDate suspendedDate;
+    private String suspendedReason;
 }
